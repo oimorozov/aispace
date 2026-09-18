@@ -1,0 +1,53 @@
+name: aispace
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      AISPACE_DATA_DIR: /data
+      AISPACE_CODEX_HOME: /data/codex
+      AISPACE_WORKSPACE_ROOT: /
+      AISPACE_HOST_MOUNT: /host
+      AISPACE_ALLOWED_ORIGINS: http://localhost:${AISPACE_PORT:-8080},http://127.0.0.1:${AISPACE_PORT:-8080}
+    volumes:
+      - aispace-data:/data
+      - ${AISPACE_PROJECTS_DIR:-.}:/workspace
+      - type: bind
+        source: ${AISPACE_HOST_ROOT:-/mnt/mac}
+        target: /host
+        bind:
+          create_host_path: false
+    security_opt:
+      - seccomp=./docker/codex-seccomp.json
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    init: true
+    restart: unless-stopped
+    ports:
+      - 127.0.0.1:${AISPACE_PORT:-8080}:80
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1/]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  aispace-data:

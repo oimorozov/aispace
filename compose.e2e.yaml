@@ -1,0 +1,25 @@
+services:
+  mock:
+    image: python:3.13-slim
+    init: true
+    command: [python, /mock_provider.py, --host, 0.0.0.0]
+    volumes:
+      - ./e2e/mock_provider.py:/mock_provider.py:ro
+    ports:
+      - 127.0.0.1:8766:8766
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/v1/models', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    environment:
+      AISPACE_WORKSPACE_ROOT: /fixtures/fixtures/projects
+      AISPACE_CODEX_COMMAND_JSON: '["python", "/fixtures/fake_codex.py"]'
+      AISPACE_FAKE_CODEX_AUDIT_URL: http://mock:8766/codex/audit
+    volumes:
+      - ./e2e:/fixtures:ro
+    depends_on:
+      mock:
+        condition: service_healthy

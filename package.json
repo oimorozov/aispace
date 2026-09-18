@@ -1,0 +1,15 @@
+{
+  "name": "aispace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "python3 scripts/dev.py",
+    "build": "npm --prefix frontend run build",
+    "test": "uv run --package aispace-backend pytest backend/tests && npm --prefix frontend run build",
+    "test:e2e": "python3 scripts/e2e.py",
+    "test:docker": "python3 scripts/e2e_docker.py"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}
