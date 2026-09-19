@@ -7,6 +7,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 events = []
+responses = {}
 events_lock = threading.Lock()
 
 
@@ -73,6 +74,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/reset":
             with events_lock:
                 events.clear()
+                responses.clear()
+            self.send_json(200, {"ok": True})
+            return
+        if path == "/responses":
+            with events_lock:
+                responses[payload["label"]] = payload
             self.send_json(200, {"ok": True})
             return
         if path == "/codex/audit":
@@ -96,7 +103,10 @@ class Handler(BaseHTTPRequestHandler):
         record(
             "start", request_id, label, messages=messages, model=payload.get("model")
         )
-        output = f"Готово: {label}."
+        with events_lock:
+            response = responses.get(label)
+        chunks = response.get("chunks", []) if response else []
+        output = "".join(chunk["content"] for chunk in chunks) if response else f"Готово: {label}."
         try:
             if not payload.get("stream"):
                 time.sleep(delay)
@@ -130,18 +140,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.close_connection = True
                 self.send_chunk(request_id, {"role": "assistant", "content": ""})
-                deadline = time.monotonic() + delay
-                while time.monotonic() < deadline:
-                    self.wfile.write(b": keepalive\n\n")
-                    self.wfile.flush()
-                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
-                self.send_chunk(request_id, {"content": output})
+                if response:
+                    for chunk in chunks:
+                        self.wait_stream(chunk.get("delay", 0))
+                        self.send_chunk(request_id, {"content": chunk["content"]})
+                        record("chunk", request_id, label, content=chunk["content"])
+                    if response.get("error"):
+                        self.wfile.write(b'data: {"error":{"message":"Mock stream failure","type":"server_error","code":"mock_stream_error"}}\n\n')
+                        self.wfile.flush()
+                        record("error", request_id, label)
+                        return
+                else:
+                    self.wait_stream(delay)
+                    self.send_chunk(request_id, {"content": output})
                 record("finish", request_id, label)
                 self.send_chunk(request_id, {}, "stop")
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             record("disconnect", request_id, label)
+
+    def wait_stream(self, delay):
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline:
+            self.wfile.write(b": keepalive\n\n")
+            self.wfile.flush()
+            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
     def send_chunk(self, request_id, delta, finish_reason=None):
         chunk = {
