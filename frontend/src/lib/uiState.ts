@@ -127,9 +127,16 @@ export function reconcileWorkspaceUi(workspace: Workspace) {
   if (!ui) return
   const ids = new Set(workspace.tasklets.map(tasklet => tasklet.id))
   const selectedId = ui.selectedId && ids.has(ui.selectedId) ? ui.selectedId : null
-  const selectedEdgeId = ui.selectedEdgeId && workspace.edges.some(edge => edge.id === ui.selectedEdgeId) ? ui.selectedEdgeId : null
-  const tasklets = Object.fromEntries(Object.entries(ui.tasklets).filter(([id]) => ids.has(id)))
-  if (selectedId !== ui.selectedId || selectedEdgeId !== ui.selectedEdgeId || Object.keys(tasklets).length !== Object.keys(ui.tasklets).length) patchWorkspaceUi(workspace.id, { selectedId, selectedEdgeId, tasklets })
+  const selectedEdgeId = !selectedId && ui.selectedEdgeId && workspace.edges.some(edge => edge.id === ui.selectedEdgeId) ? ui.selectedEdgeId : null
+  let sourceChanged = false
+  const tasklets = Object.fromEntries(Object.entries(ui.tasklets).filter(([id]) => ids.has(id)).map(([id, tasklet]) => {
+    if (tasklet.source && (!ids.has(tasklet.source) || tasklet.source === id || workspace.edges.some(edge => edge.source === tasklet.source && edge.target === id))) {
+      sourceChanged = true
+      return [id, { ...tasklet, source: '' }]
+    }
+    return [id, tasklet]
+  }))
+  if (sourceChanged || selectedId !== ui.selectedId || selectedEdgeId !== ui.selectedEdgeId || Object.keys(tasklets).length !== Object.keys(ui.tasklets).length) patchWorkspaceUi(workspace.id, { selectedId, selectedEdgeId, tasklets })
 }
 export function reconcileWorkspaceList(ids: string[]) {
   const allowed = new Set([...ids, '__global__'])
