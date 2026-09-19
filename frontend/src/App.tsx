@@ -117,6 +117,17 @@ export default function App() {
       workspaces: value => { listRevision.current += 1; acceptList(value) },
       workspace: acceptWorkspace,
       settings: acceptSettings,
+      chatReset: value => {
+        if (knownIds.current && !knownIds.current.has(value.workspace_id)) return
+        revisions.current[value.workspace_id] = (revisions.current[value.workspace_id] || 0) + 1
+        const ids = new Set(value.tasklet_ids)
+        setMessageEvents(previous => previous.filter(item => item.value.workspace_id !== value.workspace_id || !ids.has(item.value.tasklet_id)))
+        setCache(previous => {
+          const workspace = previous[value.workspace_id]
+          if (!workspace) return previous
+          return { ...previous, [value.workspace_id]: { ...workspace, tasklets: workspace.tasklets.map(tasklet => ids.has(tasklet.id) ? { ...tasklet, conversation_id: value.conversation_id, last_output: '', error: null } : tasklet) } }
+        })
+      },
       message: value => {
         if (knownIds.current && !knownIds.current.has(value.workspace_id)) return
         const event = { sequence: ++messageSequence.current, value }; setMessageEvents(previous => [...previous.filter(item => item.value.id !== value.id).slice(-255), event])

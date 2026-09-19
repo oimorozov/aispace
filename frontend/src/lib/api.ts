@@ -1,4 +1,4 @@
-import type { CodexLogin, CodexStatus, Dependency, DirectoryCapabilities, DirectoryListing, Message, Pipeline, Settings, SettingsUpdate, Tasklet, Workspace, WorkspaceSummary } from './types'
+import type { ChatReset, CodexLogin, CodexStatus, Dependency, DirectoryCapabilities, DirectoryListing, Message, Pipeline, Settings, SettingsUpdate, Tasklet, Workspace, WorkspaceSummary } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response
@@ -57,6 +57,7 @@ export function subscribe(handlers: {
   workspaces: (value: WorkspaceSummary[]) => void
   workspace: (value: Workspace) => void
   message: (value: Message) => void
+  chatReset: (value: ChatReset) => void
   settings: (value: Settings) => void
   connection: (connected: boolean) => void
 }) {
@@ -66,6 +67,7 @@ export function subscribe(handlers: {
   source.addEventListener('workspaces', event => handlers.workspaces(JSON.parse(event.data)))
   source.addEventListener('workspace', event => handlers.workspace(JSON.parse(event.data)))
   source.addEventListener('message', event => handlers.message(JSON.parse(event.data)))
+  source.addEventListener('chat_reset', event => handlers.chatReset(JSON.parse(event.data)))
   source.addEventListener('settings', event => handlers.settings(JSON.parse(event.data)))
   return () => source.close()
 }

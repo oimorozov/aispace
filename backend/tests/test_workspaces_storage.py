@@ -140,6 +140,8 @@ def test_legacy_migration_preserves_data_and_is_idempotent(tmp_path, own_cwd):
         expected = before[table]
         if table == "tasklets" and not own_cwd:
             expected = [{**row, "working_directory": None} for row in expected]
+        if table == "tasklets":
+            expected = [{**row, "conversation_id": None} for row in expected]
         assert migrated == expected
     workspace = store.workspace(workspace_id)
     assert workspace["workspace_context"] == before["settings"]["workspace_context"]
@@ -154,7 +156,7 @@ def test_legacy_migration_preserves_data_and_is_idempotent(tmp_path, own_cwd):
     assert store.codex_session("task-a") == {
         "thread_id": "thread-existing-a", "cwd": "/projects/override",
     }
-    assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert store.connection.execute("PRAGMA user_version").fetchone()[0] == 2
     assert not store.connection.execute("PRAGMA foreign_key_check").fetchall()
     assert auth.read_text() == "unrelated auth state"
     store.close()
