@@ -10,6 +10,7 @@ interface Props {
   workspaceId: string
   workingDirectory: string | null
   runBlocked: boolean
+  runBlockedReason: string
   tasklet: Tasklet
   tasklets: Tasklet[]
   edges: Dependency[]
@@ -30,7 +31,7 @@ interface Props {
   onUpdateEdge: (id: string, pass: boolean) => Promise<void>
 }
 
-export function Inspector({ workspaceId, workingDirectory, runBlocked, tasklet, tasklets, edges, messages, messagesLoading, locked, running, stopping, settings, onStop, onClose, onSave, onDelete, onRun, onSend, onConnect, onDeleteEdge, onUpdateEdge }: Props) {
+export function Inspector({ workspaceId, workingDirectory, runBlocked, runBlockedReason, tasklet, tasklets, edges, messages, messagesLoading, locked, running, stopping, settings, onStop, onClose, onSave, onDelete, onRun, onSend, onConnect, onDeleteEdge, onUpdateEdge }: Props) {
   useWorkspaceUi(workspaceId)
   const ui = taskletUi(workspaceId, tasklet.id)
   const { tab, message, source } = ui
@@ -47,6 +48,7 @@ export function Inspector({ workspaceId, workingDirectory, runBlocked, tasklet, 
   const chatHistory = useRef<HTMLDivElement>(null)
   const taskBody = useRef<HTMLDivElement>(null)
   const dirty = title !== tasklet.title || prompt !== tasklet.prompt || model !== (tasklet.model || '') || directory !== tasklet.working_directory
+  const restartable = ['completed', 'failed', 'cancelled'].includes(tasklet.status)
   const effectiveDirectory = tasklet.working_directory || workingDirectory
   const codexMode = settings?.execution_mode === 'codex'
   const incoming = edges.filter(edge => edge.target === tasklet.id)
@@ -98,7 +100,7 @@ export function Inspector({ workspaceId, workingDirectory, runBlocked, tasklet, 
         </section>
         {tasklet.last_output && <section className="result-preview"><h3>Последний результат</h3><p>{tasklet.last_output}</p><button className="text-button" onClick={() => setTab('chat')}>Открыть в чате <MessageSquare size={13} /></button></section>}
       </div> : <div className="chat-panel">{codexMode && <div className="chat-context"><FolderOpen size={13} /><span title={effectiveDirectory || undefined}>{effectiveDirectory || 'Рабочая папка не выбрана'}</span></div>}<div className="chat-history" ref={chatHistory} onScroll={event => { const element = event.currentTarget; if (!messagesLoading) patch({ chatScroll: element.scrollTop, chatAtBottom: element.scrollHeight - element.scrollTop - element.clientHeight < 40 }) }} role="log" aria-label="История чата" aria-live="polite">{messagesLoading && <div className="chat-loading"><LoaderCircle size={18} className="spin" />Загружаем историю…</div>}{!messagesLoading && messages.filter(item => item.role !== 'system').length === 0 && <p className="chat-empty">Сообщений пока нет</p>}{messages.filter(item => item.role !== 'system').map(item => <article className={`chat-message message-${item.role}`} key={item.id}><span className="message-author">{item.role === 'user' ? 'Вы' : 'AI'}</span>{item.content ? <MessageContent content={item.content} /> : <div className="thinking">Думает…</div>}</article>)}{tasklet.status === 'running' && <div className="chat-working"><LoaderCircle size={12} className="spin" />Тасклет работает</div>}</div>{tasklet.error && <div className="notice error-notice chat-error" role="alert">{tasklet.error}</div>}{dirty && <div className="notice chat-error">Сохраните изменения на вкладке «Задача» перед отправкой сообщения.</div>}<form className="chat-composer" onSubmit={event => { event.preventDefault(); if (!message.trim() || runBlocked || locked || pending || dirty) return; void perform(async () => { await onSend(message.trim()); patch(current => ({ ...current, message: current.message === message ? '' : current.message })) }) }}><textarea aria-label="Сообщение" placeholder="Напишите сообщение…" rows={3} value={message} onChange={event => setMessage(event.target.value)} disabled={locked || pending || dirty} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} /><div className="composer-footer"><span>{runBlocked || locked ? 'Дождитесь завершения пайплайна' : '⌘ / Ctrl + Enter — отправить'}</span><div className="composer-actions">{running && <button type="button" className="button button-stop" onClick={() => void onStop()} disabled={stopping}>{stopping ? <LoaderCircle size={13} className="spin" /> : <Square size={10} fill="currentColor" />}{stopping ? 'Останавливаем…' : 'Остановить всё'}</button>}{!running && <button type="submit" className="send-button" aria-label="Отправить сообщение" disabled={runBlocked || locked || pending || dirty || !message.trim()}><ArrowUp size={17} /></button>}</div></div></form></div>}
-      {tab === 'task' && <div className="inspector-footer">{running ? <button className="button button-stop full-width" onClick={() => void onStop()} disabled={stopping}>{stopping ? <LoaderCircle size={14} className="spin" /> : <Square size={12} fill="currentColor" />}{stopping ? 'Останавливаем…' : 'Остановить всё'}</button> : <button className="button button-primary full-width" disabled={runBlocked || locked || pending || dirty || !tasklet.prompt.trim()} onClick={() => void perform(async () => { await onRun(); setTab('chat') })}><Play size={14} fill="currentColor" />Запустить тасклет</button>}{dirty && <span className="field-help">Сохраните изменения перед запуском.</span>}</div>}
+      {(tab === 'task' || restartable) && <div className="inspector-footer">{running ? <button className="button button-stop full-width" onClick={() => void onStop()} disabled={stopping}>{stopping ? <LoaderCircle size={14} className="spin" /> : <Square size={12} fill="currentColor" />}{stopping ? 'Останавливаем…' : 'Остановить всё'}</button> : <button className="button button-primary full-width" aria-label={restartable ? `Перезапустить тасклет: ${tasklet.title}` : 'Запустить тасклет'} disabled={runBlocked || locked || pending || dirty || !tasklet.prompt.trim()} onClick={() => void perform(async () => { await onRun(); setTab('chat') })}><Play size={14} fill="currentColor" />{restartable ? 'Перезапустить тасклет' : 'Запустить тасклет'}</button>}{(dirty || runBlockedReason || restartable) && <span className="field-help">{dirty ? 'Сохраните изменения перед запуском' : runBlockedReason || 'Запустится заново в новом чате'}</span>}</div>}
       {ui.picker && <DirectoryPicker value={directory || workingDirectory} state={ui.picker} onStateChange={picker => patch({ picker })} onClose={() => patch({ picker: null })} onSelect={value => { draft({ working_directory: value }); patch({ picker: null }) }} />}
     </aside>
   )
