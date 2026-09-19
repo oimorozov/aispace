@@ -3,6 +3,7 @@ export type TaskletStatus = 'idle' | 'queued' | 'running' | 'completed' | 'faile
 export interface Tasklet {
   id: string
   workspace_id: string
+  conversation_id: string | null
   title: string
   prompt: string
   model: string | null
@@ -25,11 +26,18 @@ export interface Dependency {
 export interface Message {
   id: string
   workspace_id: string
+  conversation_id: string | null
   tasklet_id: string
   role: 'user' | 'assistant' | 'system'
   content: string
   created_at: string
   run_id: string | null
+}
+
+export interface ChatReset {
+  workspace_id: string
+  tasklet_ids: string[]
+  conversation_id: string
 }
 
 export interface Pipeline {

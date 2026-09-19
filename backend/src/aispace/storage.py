@@ -36,16 +36,18 @@ class Store:
 
     def _initialize(self):
         version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-        if version > 1:
+        if version > 2:
             raise RuntimeError("Версия базы данных новее версии приложения")
-        if version == 0:
+        if version < 2:
             self.connection.execute("PRAGMA foreign_keys=OFF")
             self.connection.execute("BEGIN IMMEDIATE")
             try:
-                self._migrate_workspaces()
+                if version == 0:
+                    self._migrate_workspaces()
+                self.connection.execute("ALTER TABLE tasklets ADD COLUMN conversation_id TEXT")
                 if self.connection.execute("PRAGMA foreign_key_check").fetchall():
                     raise sqlite3.IntegrityError("Нарушена принадлежность данных пространства")
-                self.connection.execute("PRAGMA user_version=1")
+                self.connection.execute("PRAGMA user_version=2")
                 self.connection.commit()
             except BaseException:
                 self.connection.rollback()
@@ -335,6 +337,7 @@ class Store:
         tasklet = {
             "id": new_id(),
             "workspace_id": workspace_id,
+            "conversation_id": None,
             "working_directory": None,
             "prompt": "",
             "model": None,
@@ -456,9 +459,9 @@ class Store:
 
     def messages(self, tasklet_id, workspace_id=None):
         workspace_id = self._workspace_id(workspace_id)
-        self._require_tasklet(tasklet_id, workspace_id)
+        tasklet = self._require_tasklet(tasklet_id, workspace_id)
         return [
-            dict(row)
+            {**dict(row), "conversation_id": tasklet["conversation_id"]}
             for row in self.connection.execute(
                 "SELECT * FROM messages WHERE tasklet_id=? AND workspace_id=? "
                 "ORDER BY created_at,rowid",
@@ -468,7 +471,7 @@ class Store:
 
     def create_message(self, tasklet_id, role, content, run_id, workspace_id=None):
         workspace_id = self._workspace_id(workspace_id)
-        self._require_tasklet(tasklet_id, workspace_id)
+        tasklet = self._require_tasklet(tasklet_id, workspace_id)
         if run_id and not self.connection.execute(
             "SELECT 1 FROM runs WHERE id=? AND workspace_id=?", (run_id, workspace_id)
         ).fetchone():
@@ -476,6 +479,7 @@ class Store:
         message = {
             "id": new_id(),
             "workspace_id": workspace_id,
+            "conversation_id": tasklet["conversation_id"],
             "tasklet_id": tasklet_id,
             "role": role,
             "content": content,
@@ -494,7 +498,7 @@ class Store:
         workspace_id = self._workspace_id(
             workspace_id if workspace_id is not None else message.get("workspace_id")
         )
-        self._require_tasklet(message["tasklet_id"], workspace_id)
+        tasklet = self._require_tasklet(message["tasklet_id"], workspace_id)
         with self.connection:
             cursor = self.connection.execute(
                 "UPDATE messages SET content=? WHERE id=? AND tasklet_id=? AND workspace_id=?",
@@ -502,12 +506,56 @@ class Store:
             )
             if not cursor.rowcount:
                 raise HTTPException(404, "Сообщение не найдено")
-        return dict(
-            self.connection.execute(
+        return {
+            **dict(self.connection.execute(
                 "SELECT * FROM messages WHERE id=? AND workspace_id=?",
                 (message["id"], workspace_id),
-            ).fetchone()
-        )
+            ).fetchone()),
+            "conversation_id": tasklet["conversation_id"],
+        }
+
+    def accept_run(self, pipeline, chosen, invalidated, reset_context=True, workspace_id=None):
+        workspace_id = self._workspace_id(workspace_id)
+        chosen = set(chosen)
+        invalidated = set(invalidated) - chosen
+        for tasklet_id in chosen | invalidated:
+            self._require_tasklet(tasklet_id, workspace_id)
+        stamp = now()
+        serialized = json.dumps(pipeline)
+        with self.connection:
+            for tasklet_id in chosen:
+                if reset_context:
+                    self.connection.execute(
+                        "DELETE FROM messages WHERE tasklet_id=? AND workspace_id=?",
+                        (tasklet_id, workspace_id),
+                    )
+                    self.connection.execute(
+                        "DELETE FROM codex_sessions WHERE tasklet_id=? AND workspace_id=?",
+                        (tasklet_id, workspace_id),
+                    )
+                    self.connection.execute(
+                        "UPDATE tasklets SET last_output='',conversation_id=? "
+                        "WHERE id=? AND workspace_id=?",
+                        (pipeline["id"], tasklet_id, workspace_id),
+                    )
+                self.connection.execute(
+                    "UPDATE tasklets SET status='queued',error=NULL,updated_at=? "
+                    "WHERE id=? AND workspace_id=?",
+                    (stamp, tasklet_id, workspace_id),
+                )
+            for tasklet_id in invalidated:
+                self.connection.execute(
+                    "UPDATE tasklets SET status='idle',error=NULL,updated_at=? "
+                    "WHERE id=? AND workspace_id=?",
+                    (stamp, tasklet_id, workspace_id),
+                )
+            self.connection.execute(
+                "INSERT INTO runs (id,workspace_id,data) VALUES (?,?,?)",
+                (pipeline["id"], workspace_id, serialized),
+            )
+            self.connection.execute(
+                "UPDATE workspaces SET pipeline=? WHERE id=?", (serialized, workspace_id)
+            )
 
     def pipeline(self, workspace_id=None):
         return self.workspace_info(self._workspace_id(workspace_id))["pipeline"]

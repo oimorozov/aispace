@@ -94,6 +94,13 @@ class Runtime:
 
     def invalidate(self, roots, exclude=None, workspace_id=None):
         workspace_id = self.require_workspace(workspace_id)["id"]
+        for tasklet_id in self.descendants(roots, workspace_id):
+            if not exclude or tasklet_id not in exclude:
+                self.store.update_tasklet(
+                    tasklet_id, {"status": "idle", "error": None}, workspace_id=workspace_id
+                )
+
+    def descendants(self, roots, workspace_id):
         children = {}
         for edge in self.store.edges(workspace_id):
             children.setdefault(edge["source"], []).append(edge["target"])
@@ -105,10 +112,7 @@ class Runtime:
                 continue
             visited.add(tasklet_id)
             pending.extend(children.get(tasklet_id, []))
-            if not exclude or tasklet_id not in exclude:
-                self.store.update_tasklet(
-                    tasklet_id, {"status": "idle", "error": None}, workspace_id=workspace_id
-                )
+        return visited
 
     def validate_edge(self, source, target, workspace_id=None):
         workspace_id = self.require_workspace(workspace_id)["id"]
@@ -195,7 +199,9 @@ class Runtime:
                         workspace_id,
                     )
             return result
-        return await self.start([tasklet_id], (tasklet_id, content), workspace_id)
+        return await self.start(
+            [tasklet_id], (tasklet_id, content), workspace_id, reset_context=False
+        )
 
     def record_command(self, tasklet_id, content, result, workspace_id=None):
         workspace_id = self.require_workspace(workspace_id)["id"]
@@ -205,7 +211,7 @@ class Runtime:
             )
             self.events.publish("message", message)
 
-    async def start(self, selected=None, followup=None, workspace_id=None):
+    async def start(self, selected=None, followup=None, workspace_id=None, *, reset_context=True):
         async with self.lock:
             workspace_id = self.require_workspace(workspace_id)["id"]
             self.ensure_idle()
@@ -253,6 +259,12 @@ class Runtime:
                 )
                 content = self.normalize_command(content)
                 self.validate_command(content, settings["execution_mode"])
+                if reset_context and content == "/goal resume":
+                    raise HTTPException(
+                        422,
+                        "Новый запуск начинает чистый чат. Отправьте /goal resume в существующий "
+                        "чат или укажите /goal с новой целью в промпте.",
+                    )
                 if content in {
                     "/goal",
                     "/goal status",
@@ -268,13 +280,20 @@ class Runtime:
             pipeline = Pipeline(
                 id=new_id(), status="running", started_at=now(), total=len(chosen)
             ).model_dump()
-            self.invalidate(chosen, exclude=chosen, workspace_id=workspace_id)
-            self.store.save_pipeline(pipeline, workspace_id=workspace_id)
-            for tasklet_id in chosen:
-                self.store.update_tasklet(
-                    tasklet_id, {"status": "queued", "error": None}, workspace_id=workspace_id
-                )
+            self.store.accept_run(
+                pipeline,
+                chosen,
+                self.descendants(chosen, workspace_id),
+                reset_context=reset_context,
+                workspace_id=workspace_id,
+            )
             self.worker_workspace_id = workspace_id
+            if reset_context:
+                self.events.publish("chat_reset", {
+                    "workspace_id": workspace_id,
+                    "tasklet_ids": sorted(chosen),
+                    "conversation_id": pipeline["id"],
+                })
             self.changed(workspace_id)
             self.worker = asyncio.create_task(
                 self.run(pipeline, chosen, parents, settings, followup, workspace_id)

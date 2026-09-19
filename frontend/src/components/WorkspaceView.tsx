@@ -29,6 +29,9 @@ export function WorkspaceView({ workspace, settings, anyRunning, messageEvents, 
   const [actionPending, setActionPending] = useState(false)
   const messageBuffer = useRef(new Map<string, { sequence: number; value: Message }>())
   const messageSequence = useRef(0)
+  const conversations = useMemo(() => Object.fromEntries(workspace.tasklets.map(tasklet => [tasklet.id, tasklet.conversation_id])), [workspace.tasklets])
+  const currentConversations = useRef(conversations)
+  currentConversations.current = conversations
   const flow = useRef<ReactFlowInstance<TaskletFlowNode> | null>(null)
   const locked = workspace.pipeline.status === 'running' || workspace.pipeline.status === 'stopping'
   const selected = workspace.tasklets.find(item => item.id === selectedId)
@@ -46,30 +49,35 @@ export function WorkspaceView({ workspace, settings, anyRunning, messageEvents, 
   const edges = useMemo(() => workspace.edges.map(edge => ({ ...edge, type: 'smoothstep', selected: edge.id === selectedEdgeId, animated: workspace.tasklets.some(item => item.id === edge.target && item.status === 'running'), markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 }, className: edge.pass_context ? 'context-edge' : '', ariaLabel: `Связь: ${workspace.tasklets.find(item => item.id === edge.source)?.title} → ${workspace.tasklets.find(item => item.id === edge.target)?.title}` })), [workspace.edges, workspace.tasklets, selectedEdgeId])
 
   useEffect(() => {
-    const events = messageEvents.filter(event => event.sequence > messageSequence.current && event.value.workspace_id === wid)
-    if (!events.length) return
-    messageSequence.current = events[events.length - 1].sequence
+    const events = messageEvents.filter(event => event.value.workspace_id === wid && event.value.conversation_id === conversations[event.value.tasklet_id])
+    if (events.length) messageSequence.current = Math.max(messageSequence.current, events[events.length - 1].sequence)
     const values = events.map(event => event.value)
+    for (const [id, event] of messageBuffer.current) {
+      if (event.value.conversation_id !== conversations[event.value.tasklet_id]) messageBuffer.current.delete(id)
+    }
     for (const event of events) messageBuffer.current.set(event.value.id, event)
     setMessages(previous => {
-      const next = { ...previous }
+      const next = Object.fromEntries(Object.entries(previous).filter(([id]) => id in conversations).map(([id, items]) => [id, items.filter(item => item.conversation_id === conversations[id])]))
       for (const value of values) next[value.tasklet_id] = mergeMessages(next[value.tasklet_id] || [], [value])
       return next
     })
-  }, [messageEvents, wid])
+  }, [messageEvents, wid, conversations])
+
+  const selectedConversation = selectedId ? conversations[selectedId] : undefined
 
   useEffect(() => {
     if (!selectedId) return
     let active = true
     const start = messageSequence.current
+    const conversation = selectedConversation
     setMessagesLoading(true)
     api.messages(wid, selectedId).then(items => {
-      if (!active) return
-      const updates = [...messageBuffer.current.values()].filter(event => event.sequence > start && event.value.tasklet_id === selectedId).map(event => event.value)
-      setMessages(previous => ({ ...previous, [selectedId]: mergeMessages(items, updates) }))
+      if (!active || currentConversations.current[selectedId] !== conversation) return
+      const updates = [...messageBuffer.current.values()].filter(event => event.sequence > start && event.value.tasklet_id === selectedId && event.value.conversation_id === conversation).map(event => event.value)
+      setMessages(previous => ({ ...previous, [selectedId]: mergeMessages(items.filter(item => item.conversation_id === conversation), updates) }))
     }).catch(error => { if (active) notify(error.message, true) }).finally(() => { if (active) setMessagesLoading(false) })
     return () => { active = false }
-  }, [wid, selectedId, reconnect, workspace.pipeline.id, notify])
+  }, [wid, selectedId, selectedConversation, reconnect, workspace.pipeline.id, notify])
 
   const mutate = useCallback(async (action: () => Promise<unknown>) => {
     try { await action(); await refresh(wid) } catch (error) { notify((error as Error).message, true); throw error }
@@ -137,7 +145,7 @@ export function WorkspaceView({ workspace, settings, anyRunning, messageEvents, 
           <div className="canvas-bottom"><div className="canvas-controls"><button className="icon-button" aria-label="Уменьшить масштаб" onClick={() => { void flow.current?.zoomOut() }}><Minus size={16} /></button><button className="icon-button" aria-label="Увеличить масштаб" onClick={() => { void flow.current?.zoomIn() }}><Plus size={16} /></button><span /><button className="icon-button" aria-label="Уместить граф" onClick={() => { void flow.current?.fitView({ padding: 0.25, duration: 300, maxZoom: 1 }) }}><Maximize size={15} /></button></div></div>
           {selectedEdge && <div className="edge-popover"><div><Link2 size={15} /><strong>Связь задач</strong><button className="icon-button" aria-label="Закрыть настройки связи" onClick={() => setSelectedEdgeId(null)}><X size={14} /></button></div><label className="checkbox-field"><input type="checkbox" checked={selectedEdge.pass_context} onChange={event => { void mutate(() => api.updateEdge(wid, selectedEdge.id, event.target.checked)).catch(() => {}) }} disabled={locked} />Передавать результат в контекст</label><button className="text-button danger-text" onClick={() => { void mutate(() => api.deleteEdge(wid, selectedEdge.id)).then(() => setSelectedEdgeId(null)).catch(() => {}) }} disabled={locked}><Trash2 size={13} />Удалить связь</button></div>}
         </div>
-        {selected && <Inspector workspaceId={wid} workingDirectory={workspace.working_directory} runBlocked={anyRunning || actionPending} settings={settings} running={locked} stopping={actionPending || workspace.pipeline.status === 'stopping'} onStop={stop} key={selected.id} tasklet={selected} tasklets={workspace.tasklets} edges={workspace.edges} messages={messages[selected.id] || []} messagesLoading={messagesLoading} locked={locked || actionPending} onClose={() => setSelectedId(null)} onSave={async value => { await mutate(() => api.updateTasklet(wid, selected.id, value)); notify('Тасклет сохранён') }} onDelete={() => { void deleteTasklet(selected.id) }} onRun={() => run([selected.id])} onSend={async content => { if (anyRunning) return; requireConfiguration([selected.id]); await mutate(() => api.sendMessage(wid, selected.id, content)) }} onConnect={(source, target) => mutate(() => api.createEdge(wid, source, target))} onDeleteEdge={id => mutate(() => api.deleteEdge(wid, id))} onUpdateEdge={(id, pass) => mutate(() => api.updateEdge(wid, id, pass))} />}
+        {selected && <Inspector workspaceId={wid} workingDirectory={workspace.working_directory} runBlocked={anyRunning || actionPending} settings={settings} running={locked} stopping={actionPending || workspace.pipeline.status === 'stopping'} onStop={stop} key={selected.id} tasklet={selected} tasklets={workspace.tasklets} edges={workspace.edges} messages={(messages[selected.id] || []).filter(message => message.conversation_id === selectedConversation)} messagesLoading={messagesLoading} locked={locked || actionPending} onClose={() => setSelectedId(null)} onSave={async value => { await mutate(() => api.updateTasklet(wid, selected.id, value)); notify('Тасклет сохранён') }} onDelete={() => { void deleteTasklet(selected.id) }} onRun={() => run([selected.id])} onSend={async content => { if (anyRunning) return; requireConfiguration([selected.id]); await mutate(() => api.sendMessage(wid, selected.id, content)) }} onConnect={(source, target) => mutate(() => api.createEdge(wid, source, target))} onDeleteEdge={id => mutate(() => api.deleteEdge(wid, id))} onUpdateEdge={(id, pass) => mutate(() => api.updateEdge(wid, id, pass))} />}
         </div></> : <SettingsPage settings={settings} workspace={workspace} globalLocked={anyRunning} workspaceLocked={locked} onUpdate={onSettingsUpdate} onWorkspaceUpdate={onUpdate} notify={notify} />}
       {creating && <CreateTasklet workspaceId={wid} onClose={() => patchWorkspaceUi(wid, { creating: false })} onCreate={createTasklet} />}
     </div>

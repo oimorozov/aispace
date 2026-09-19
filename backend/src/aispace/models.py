@@ -97,6 +97,7 @@ TaskStatus = Literal["idle", "queued", "running", "completed", "failed", "cancel
 class Tasklet(BaseModel):
     id: str
     workspace_id: str
+    conversation_id: str | None = None
     title: str
     prompt: str
     model: str | None
@@ -119,6 +120,7 @@ class Edge(BaseModel):
 class Message(BaseModel):
     id: str
     workspace_id: str
+    conversation_id: str | None = None
     tasklet_id: str
     role: Literal["user", "assistant", "system"]
     content: str
