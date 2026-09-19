@@ -4,6 +4,7 @@ import { api } from '../lib/api'
 import type { CodexLogin, CodexStatus, Settings, Workspace } from '../lib/types'
 import { clearMatching, patchSettingsUi, patchWorkspaceUi, useWorkspaceUi, type GlobalDraft, type WorkspaceDraft } from '../lib/uiState'
 import { DirectoryField, DirectoryPicker } from './DirectoryPicker'
+import { GitHubConnection } from './GitHubConnection'
 
 export function SettingsPage({ settings, workspace, globalLocked, workspaceLocked, onUpdate, onWorkspaceUpdate, notify }: { settings: Settings; workspace: Workspace | null; globalLocked: boolean; workspaceLocked: boolean; onUpdate: (settings: Settings) => void | Promise<void>; onWorkspaceUpdate: (workspace: Workspace) => void | Promise<void>; notify: (text: string, error?: boolean) => void }) {
   const wid = workspace?.id || '__global__'
@@ -134,5 +135,6 @@ export function SettingsPage({ settings, workspace, globalLocked, workspaceLocke
       <div className="settings-footer">{globalDirty && <span>Есть несохранённые изменения</span>}<button className="button button-primary" disabled={disabled || !globalDirty}>{pending === 'global' ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}{pending === 'global' ? 'Сохраняем…' : 'Сохранить настройки'}</button></div>
     </form>
     {ui.picker && workspace && <DirectoryPicker value={directory} state={ui.picker} onStateChange={picker => patchSettingsUi(wid, { picker })} onClose={() => patchSettingsUi(wid, { picker: null })} onSelect={value => { setWorkspace({ working_directory: value }); patchSettingsUi(wid, { picker: null }) }} />}
+    <GitHubConnection />
   </main>
 }

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Check, CircleHelp, Layers2, LoaderCircle, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings2, Trash2, Workflow, X } from 'lucide-react'
+import { Check, CircleHelp, Github, Layers2, LoaderCircle, PanelLeftClose, PanelLeftOpen, Pencil, Plus, Settings2, Trash2, Workflow, X } from 'lucide-react'
 import { api, ApiError, subscribe } from './lib/api'
-import type { Message, Settings, Workspace, WorkspaceSummary } from './lib/types'
+import type { GitHubSelection, Message, Settings, Workspace, WorkspaceSummary } from './lib/types'
 import { getUiState, patchWorkspaceUi, reconcileWorkspaceList, reconcileWorkspaceUi, uiStorageUnavailable, updateUi, useUiState } from './lib/uiState'
 import { WorkspaceView } from './components/WorkspaceView'
 import { WorkspaceDialog } from './components/WorkspaceDialog'
 import { SettingsPage } from './components/SettingsPage'
+import { GitHubImport } from './components/GitHubImport'
 
 const isRunning = (workspace: WorkspaceSummary) => ['running', 'stopping'].includes(workspace.pipeline.status)
 
@@ -21,6 +22,7 @@ export default function App() {
   const [reconnect, setReconnect] = useState(0)
   const [messageEvents, setMessageEvents] = useState<{ sequence: number; value: Message }[]>([])
   const [dialog, setDialog] = useState<{ mode: 'create' | 'rename' | 'delete'; workspace?: WorkspaceSummary } | null>(null)
+  const [githubImport, setGitHubImport] = useState<{ selection?: GitHubSelection } | null>(null)
   const [toast, setToast] = useState<{ text: string; error: boolean } | null>(null)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const alive = useRef(true)
@@ -191,6 +193,7 @@ export default function App() {
     </aside>}
     <div className="main-area">
       <div className="workspace-switcher">
+        <button className="icon-button" aria-label="Импортировать GitHub Issues" title="Импортировать GitHub Issues" onClick={() => setGitHubImport({})}><Github size={17} /></button>
         <button className="icon-button" aria-label={ui.sidebarCollapsed ? 'Показать боковую панель' : 'Скрыть боковую панель'} aria-expanded={!ui.sidebarCollapsed} onClick={() => updateUi(current => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed }))}>{ui.sidebarCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}</button>
         <select aria-label="Рабочее пространство" value={activeId || ''} disabled={!workspaces.length} onChange={event => switchWorkspace(event.target.value)}>{!workspaces.length && <option value="">Нет пространств</option>}{workspaces.map(item => <option key={item.id} value={item.id}>{item.name}{isRunning(item) ? ' · Выполняется' : ''}</option>)}</select>
         <button className="icon-button" aria-label="Создать пространство" title="Создать пространство" onClick={() => setDialog({ mode: 'create' })} disabled={!loaded}><Plus size={17} /></button>
@@ -202,6 +205,7 @@ export default function App() {
       {workspace && settings ? <WorkspaceView key={workspace.id} workspace={workspace} settings={settings} anyRunning={Boolean(running)} messageEvents={messageEvents} reconnect={reconnect} refresh={refreshWorkspace} onUpdate={value => refreshWorkspace(value.id)} onSettingsUpdate={refreshSettings} notify={notify} /> : loaded && !workspaces.length && page === 'settings' && settings ? <SettingsPage key="global-settings" workspace={null} settings={settings} globalLocked={Boolean(running)} workspaceLocked={false} onUpdate={refreshSettings} onWorkspaceUpdate={value => refreshWorkspace(value.id)} notify={notify} /> : <div className="workspace-unavailable">{loadError || (activeId && workspaceErrors[activeId]) ? <><CircleHelp size={28} /><h1>Не удалось открыть пространство</h1><p>{loadError || (activeId && workspaceErrors[activeId])}</p><button className="button button-secondary" onClick={() => { void initialize(); if (activeId) void refreshWorkspace(activeId).catch(() => {}) }}>Попробовать снова</button></> : !loaded || workspaces.length ? <><LoaderCircle size={25} className="spin" /><p>Открываем пространство…</p></> : <><Layers2 size={35} strokeWidth={1.3} /><h1>Создайте рабочее пространство</h1><button className="button button-primary" onClick={() => setDialog({ mode: 'create' })}><Plus size={16} />Новое пространство</button></>}</div>}
     </div>
     {dialog && <WorkspaceDialog key={`${dialog.mode}:${dialog.workspace?.id || ''}`} mode={dialog.mode} workspace={dialog.workspace} onClose={() => setDialog(null)} onSubmit={submitWorkspace} />}
+    {githubImport && <GitHubImport selection={githubImport.selection} onPlan={selection => setGitHubImport({ selection })} onBack={() => setGitHubImport({})} onClose={() => setGitHubImport(null)} />}
     {toast && <div className={`toast ${toast.error ? 'toast-error' : ''}`} role={toast.error ? 'alert' : 'status'}>{toast.error ? <CircleHelp size={16} /> : <Check size={16} />}<span>{toast.text}</span><button className="icon-button" aria-label="Закрыть уведомление" onClick={() => setToast(null)}><X size={15} /></button></div>}
   </div>
 }

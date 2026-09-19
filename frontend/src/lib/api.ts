@@ -1,4 +1,4 @@
-import type { ChatReset, CodexLogin, CodexStatus, Dependency, DirectoryCapabilities, DirectoryListing, Message, Pipeline, Settings, SettingsUpdate, Tasklet, Workspace, WorkspaceSummary } from './types'
+import type { ChatReset, CodexLogin, CodexStatus, Dependency, DirectoryCapabilities, DirectoryListing, GitHubIssue, GitHubRepository, GitHubSelection, Message, Pipeline, Settings, SettingsUpdate, Tasklet, Workspace, WorkspaceSummary } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response
@@ -26,6 +26,11 @@ export class ApiError extends Error {
 const body = (value: unknown) => JSON.stringify(value)
 
 export const api = {
+  githubConnection: () => request<{ token_configured: boolean }>('/github/connection'),
+  updateGitHubConnection: (token: string | null) => request<{ token_configured: boolean }>('/github/connection', { method: 'PATCH', body: body({ token }) }),
+  githubRepository: (repository: string) => request<{ repository: GitHubRepository; issues: GitHubIssue[] }>('/github/repository', { method: 'POST', body: body({ repository }) }),
+  githubSelection: (repository: GitHubRepository, issues: GitHubIssue[]) => request<GitHubSelection>('/github/selections', { method: 'POST', body: body({ repository: repository.full_name, repository_id: repository.id, issues: issues.map(({ id, number }) => ({ id, number })) }) }),
+  getGitHubSelection: (id: string) => request<GitHubSelection>(`/github/selections/${id}`),
   workspaces: () => request<WorkspaceSummary[]>('/workspaces'),
   createWorkspace: (name: string) => request<Workspace>('/workspaces', { method: 'POST', body: body({ name }) }),
   workspace: (wid: string) => request<Workspace>(`/workspaces/${wid}`),

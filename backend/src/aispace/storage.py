@@ -29,6 +29,13 @@ class Store:
         self.connection.row_factory = sqlite3.Row
         try:
             self._initialize()
+            with self.connection:
+                self.connection.execute(
+                    "CREATE TABLE IF NOT EXISTS integrations (name TEXT PRIMARY KEY, secret TEXT)"
+                )
+                self.connection.execute(
+                    "CREATE TABLE IF NOT EXISTS github_selections (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
+                )
             self.recover()
         except BaseException:
             self.connection.close()
@@ -173,6 +180,33 @@ class Store:
 
     def close(self):
         self.connection.close()
+
+    def github_token(self):
+        row = self.connection.execute(
+            "SELECT secret FROM integrations WHERE name='github'"
+        ).fetchone()
+        return row[0] if row else None
+
+    def save_github_token(self, token):
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO integrations (name,secret) VALUES ('github',?) "
+                "ON CONFLICT(name) DO UPDATE SET secret=excluded.secret",
+                (token,),
+            )
+
+    def save_github_selection(self, snapshot):
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO github_selections (id,data) VALUES (?,?)",
+                (snapshot["id"], json.dumps(snapshot)),
+            )
+
+    def github_selection(self, selection_id):
+        row = self.connection.execute(
+            "SELECT data FROM github_selections WHERE id=?", (selection_id,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
 
     def recover(self):
         for workspace in self.workspaces():

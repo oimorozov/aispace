@@ -103,6 +103,41 @@ export interface DirectoryCapabilities {
 
 export type SettingsUpdate = Partial<Omit<Settings, 'api_key_configured'>> & { api_key?: string | null }
 
+export interface GitHubRepository {
+  id: number
+  full_name: string
+  url: string
+  private: boolean
+}
+
+export interface GitHubIssue {
+  id: number
+  number: number
+  url: string
+  title: string
+  body: string
+  state: 'open' | 'closed'
+  state_reason: string | null
+  labels: { name: string; color: string }[]
+  updated_at: string
+}
+
+export interface GitHubDependency {
+  id: number
+  number: number
+  repository: string
+  url: string
+  title: string
+  state: 'open' | 'closed'
+}
+
+export interface GitHubSelection {
+  id: string
+  repository: GitHubRepository
+  created_at: string
+  issues: (GitHubIssue & { dependencies: { status: 'complete' | 'unavailable'; blocked_by: GitHubDependency[]; error: string | null } })[]
+}
+
 export const statusLabels: Record<TaskletStatus, string> = {
   idle: 'Готов к запуску',
   queued: 'В очереди',
