@@ -13,7 +13,7 @@ test.beforeEach(async ({ request }) => {
 test('all GitHub pages, search, persistent selection and complete snapshot reach the planner', async ({ page, request }, testInfo) => {
   const before = await (await request.get(`${backend}/api/workspaces`)).json()
   await page.goto('/')
-  await page.getByRole('button', { name: 'Скрыть боковую панель', exact: true }).click()
+  await page.getByRole('button', { name: 'Свернуть боковую панель', exact: true }).click()
   await page.getByRole('button', { name: 'Импортировать GitHub Issues', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Импортировать GitHub Issues', exact: true })
   await dialog.getByRole('textbox', { name: 'Репозиторий GitHub', exact: true }).fill('https://github.com/demo/project')
@@ -101,7 +101,7 @@ test('empty mobile app import handles rate limits and failed dependency reads ex
   await request.post(`${github}/fixture`, { data: { rate_remaining: 1 } })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')
-  await page.getByRole('button', { name: 'Скрыть боковую панель', exact: true }).click()
+  await page.getByRole('button', { name: 'Свернуть боковую панель', exact: true }).click()
   await page.getByRole('button', { name: 'Импортировать GitHub Issues', exact: true }).click()
   const dialog = page.getByRole('dialog')
   await dialog.getByRole('textbox', { name: 'Репозиторий GitHub', exact: true }).fill('demo/project')

@@ -19,7 +19,7 @@ test.beforeEach(async ({ request }) => {
   edgeId = edge.id
 })
 
-const toggle = (page: Page, collapsed: boolean) => page.getByRole('button', { name: collapsed ? 'Показать боковую панель' : 'Скрыть боковую панель', exact: true })
+const toggle = (page: Page, collapsed: boolean) => page.locator('.sidebar').getByRole('button', { name: collapsed ? 'Развернуть боковую панель' : 'Свернуть боковую панель', exact: true })
 
 for (const width of [1440, 850, 390]) {
   test(`sidebar toggles by keyboard without resetting drafts or viewport at ${width}px`, async ({ page }) => {
@@ -33,7 +33,8 @@ for (const width of [1440, 850, 390]) {
     await page.keyboard.press('Enter')
     await expect(toggle(page, true)).toHaveAttribute('aria-expanded', 'false')
     await expect(toggle(page, true)).toBeFocused()
-    await expect(page.locator('.sidebar')).toHaveCount(0)
+    await expect(page.locator('.sidebar')).toBeVisible()
+    await expect(page.locator('.sidebar')).toHaveCSS('width', '60px')
     await expect(page.getByRole('textbox', { name: 'Промпт', exact: true })).toHaveValue('Черновик инструкции')
     await page.keyboard.press('Space')
     await expect(toggle(page, false)).toHaveAttribute('aria-expanded', 'true')
@@ -58,11 +59,14 @@ for (const width of [1440, 850, 390]) {
     await expect(page.locator('.sidebar')).toBeVisible()
     await expect(page.getByRole('textbox', { name: 'Контекст пространства', exact: true })).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.getByRole('button', { name: 'Пространство', exact: true }).click()
+    await expect(page.getByRole('tab', { name: /^Чат/ })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByPlaceholder('Напишите сообщение…', { exact: true })).toHaveValue('Черновик сообщения')
     expect(writes).toEqual([])
   })
 }
 
-test('hidden sidebar stays hidden across resizing and preserves selected dependency', async ({ page }) => {
+test('compact sidebar stays compact across resizing and preserves selected dependency', async ({ page }) => {
   await page.goto('/')
   await page.locator(`.react-flow__edge[data-id="${edgeId}"]`).click()
   await expect(page.getByText('Связь задач', { exact: true })).toBeVisible()
@@ -71,7 +75,8 @@ test('hidden sidebar stays hidden across resizing and preserves selected depende
   await toggle(page, false).click()
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(toggle(page, true)).toBeVisible()
-  await expect(page.locator('.sidebar')).toHaveCount(0)
+  await expect(page.locator('.sidebar')).toBeVisible()
+  await expect(page.locator('.sidebar')).toHaveCSS('width', '60px')
   await page.setViewportSize({ width: 1440, height: 1000 })
   await expect(page.getByText('Связь задач', { exact: true })).toBeVisible()
   await expect(page.locator('.react-flow__viewport')).toHaveAttribute('style', viewport!)
@@ -80,3 +85,45 @@ test('hidden sidebar stays hidden across resizing and preserves selected depende
   await expect(toggle(page, false)).toHaveAttribute('aria-expanded', 'true')
   await expect(page.getByText('Связь задач', { exact: true })).toBeVisible()
 })
+
+for (const reducedMotion of ['no-preference', 'reduce'] as const) {
+  test(`rapid toggles, tooltips and layout (${reducedMotion})`, async ({ page }) => {
+    await page.emulateMedia({ reducedMotion })
+    await page.goto('/')
+    for (const width of [1440, 850, 390]) {
+      await page.setViewportSize({ width, height: 1000 })
+      for (const collapsed of [false, true]) {
+        const button = toggle(page, collapsed)
+        await expect(button).toBeVisible()
+        await expect(page.locator('.workspace-switcher [aria-expanded], .compact-navigation')).toHaveCount(0)
+        await expect(page.locator('.sidebar .nav-item').first().locator('span').first()).toHaveCSS('opacity', collapsed ? '0' : '1')
+        await expect(page.locator('.sidebar .nav-item.active')).toHaveAttribute('aria-current', 'page')
+        const panel = page.locator('.sidebar')
+        await expect(panel).toHaveCSS('width', collapsed ? '60px' : `${width <= 540 ? 156 : width <= 960 ? 196 : 224}px`)
+        const box = (await panel.boundingBox())!
+        const control = (await button.boundingBox())!
+        expect(control.x).toBeGreaterThanOrEqual(box.x)
+        expect(control.x + control.width).toBeLessThanOrEqual(box.x + box.width)
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+        await expect(panel).toHaveCSS('transition-duration', reducedMotion === 'reduce' ? '0s' : '0.18s')
+        if (collapsed) {
+          const nav = page.getByRole('button', { name: 'Настройки', exact: true })
+          await nav.focus()
+          expect(await nav.evaluate(el => getComputedStyle(el, '::after').visibility)).toBe('visible')
+          await page.keyboard.press('Enter')
+          await expect(nav).toHaveAttribute('aria-current', 'page')
+          await page.getByRole('button', { name: 'Пространство', exact: true }).click()
+          await nav.hover()
+          expect(await nav.evaluate(el => getComputedStyle(el, '::after').visibility)).toBe('visible')
+        }
+        await button.focus()
+        await page.keyboard.press('Enter')
+        await page.keyboard.press('Space')
+        await page.keyboard.press('Enter')
+        await expect(toggle(page, !collapsed)).toBeFocused()
+        await expect(panel).toHaveCSS('width', !collapsed ? '60px' : `${width <= 540 ? 156 : width <= 960 ? 196 : 224}px`)
+        await page.screenshot({ path: `test-results/sidebar-${reducedMotion}-${width}-${!collapsed}.png` })
+      }
+    }
+  })
+}

@@ -93,7 +93,7 @@ test('each workspace restores its own draft, selection and viewport across switc
   await selector(page).selectOption(b.id)
   await expect(page.getByPlaceholder('Напишите сообщение…', { exact: true })).toHaveValue('Черновик B')
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.getByRole('button', { name: 'Скрыть боковую панель', exact: true }).click()
+  await page.getByRole('button', { name: 'Свернуть боковую панель', exact: true }).click()
   await expect(selector(page)).toBeVisible()
   await selector(page).selectOption(a.id)
   await expect(page.getByPlaceholder('Напишите сообщение…', { exact: true })).toHaveValue('Черновик A')
