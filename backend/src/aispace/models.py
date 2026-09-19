@@ -48,13 +48,11 @@ class EdgePatch(InputModel):
 
 class SettingsPatch(InputModel):
     execution_mode: Literal["api", "codex"] | None = None
-    working_directory: str | None = Field(default=None, max_length=4096)
     codex_sandbox: Literal["read-only", "workspace-write"] | None = None
     api_key: str | None = Field(default=None, max_length=4096)
     base_url: str | None = Field(default=None, max_length=2048)
     model: str | None = Field(default=None, max_length=200)
     max_parallel: int | None = Field(default=None, ge=1, le=8)
-    workspace_context: str | None = Field(default=None, max_length=200_000)
 
     @field_validator("base_url")
     @classmethod
@@ -73,9 +71,7 @@ class SettingsPatch(InputModel):
             raise ValueError("Нужен HTTP(S) адрес API без пароля, параметров и фрагмента")
         return value.rstrip("/")
 
-    @field_validator(
-        "model", "max_parallel", "workspace_context", "execution_mode", "codex_sandbox"
-    )
+    @field_validator("model", "max_parallel", "execution_mode", "codex_sandbox")
     @classmethod
     def not_null(cls, value):
         if value is None:
@@ -100,6 +96,7 @@ TaskStatus = Literal["idle", "queued", "running", "completed", "failed", "cancel
 
 class Tasklet(BaseModel):
     id: str
+    workspace_id: str
     title: str
     prompt: str
     model: str | None
@@ -121,6 +118,7 @@ class Edge(BaseModel):
 
 class Message(BaseModel):
     id: str
+    workspace_id: str
     tasklet_id: str
     role: Literal["user", "assistant", "system"]
     content: str
@@ -140,19 +138,43 @@ class Pipeline(BaseModel):
 
 class Settings(BaseModel):
     execution_mode: Literal["api", "codex"] = "api"
-    working_directory: str | None = None
     codex_sandbox: Literal["read-only", "workspace-write"] = "read-only"
     api_key_configured: bool
     base_url: str
     model: str
     max_parallel: int
+
+
+class WorkspaceCreate(InputModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+class WorkspacePatch(InputModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    workspace_context: str | None = Field(default=None, max_length=200_000)
+    working_directory: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("name", "workspace_context")
+    @classmethod
+    def not_null(cls, value):
+        if value is None:
+            raise ValueError("Значение не может быть null")
+        return value
+
+
+class WorkspaceSummary(BaseModel):
+    id: str
+    name: str
+    created_at: str
+    updated_at: str
+    pipeline: Pipeline
+
+
+class Workspace(WorkspaceSummary):
     workspace_context: str
-
-
-class Workspace(BaseModel):
+    working_directory: str | None
     tasklets: list[Tasklet]
     edges: list[Edge]
-    pipeline: Pipeline
 
 
 class DirectoryChoose(BaseModel):

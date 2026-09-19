@@ -1,15 +1,17 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 
 const backend = `${(process.env.AISPACE_E2E_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')}/api`
+let workspaceBase: string
+
 const provider = 'http://127.0.0.1:8766'
 const providerBaseUrl = process.env.AISPACE_E2E_PROVIDER_URL || `${provider}/v1`
 
 type Tasklet = { id: string; title: string; prompt: string; status: string; last_output: string }
-type Workspace = { tasklets: Tasklet[]; edges: { id: string; source: string; target: string; pass_context: boolean }[]; pipeline: { status: string } }
+type Workspace = { tasklets: Tasklet[]; edges: { id: string; source: string; target: string; pass_context: boolean }[]; pipeline: { status: string }; workspace_context: string }
 type AuditEvent = { kind: string; request_id: string; label: string; time: number; messages?: { role: string; content: string }[] }
 
 async function workspace(request: APIRequestContext): Promise<Workspace> {
-  const response = await request.get(`${backend}/workspace`)
+  const response = await request.get(`${workspaceBase}`)
   expect(response.ok()).toBeTruthy()
   return response.json()
 }
@@ -21,7 +23,7 @@ async function audit(request: APIRequestContext): Promise<AuditEvent[]> {
 }
 
 async function createTasklet(request: APIRequestContext, title: string, label: string, delay = 0.7, x = 100, y = 100): Promise<Tasklet> {
-  const response = await request.post(`${backend}/tasklets`, {
+  const response = await request.post(`${workspaceBase}/tasklets`, {
     data: { title, prompt: `Выполни задачу [[label:${label}]][[delay:${delay}]]`, position: { x, y } },
   })
   expect(response.ok()).toBeTruthy()
@@ -29,7 +31,7 @@ async function createTasklet(request: APIRequestContext, title: string, label: s
 }
 
 async function connect(request: APIRequestContext, source: Tasklet, target: Tasklet) {
-  const response = await request.post(`${backend}/edges`, { data: { source: source.id, target: target.id, pass_context: false } })
+  const response = await request.post(`${workspaceBase}/edges`, { data: { source: source.id, target: target.id, pass_context: false } })
   expect(response.ok()).toBeTruthy()
 }
 
@@ -44,14 +46,22 @@ async function createTaskletInUI(page: Page, title: string, prompt: string) {
 }
 
 test.beforeEach(async ({ request }) => {
-  await request.post(`${backend}/pipeline/stop`)
+  const existing = await (await request.get(`${backend}/workspaces`)).json()
+  for (const item of existing) {
+    expect((await request.post(`${backend}/workspaces/${item.id}/pipeline/stop`)).ok()).toBeTruthy()
+    expect((await request.delete(`${backend}/workspaces/${item.id}`)).ok()).toBeTruthy()
+  }
+  const created = await request.post(`${backend}/workspaces`, { data: { name: 'Тестовое пространство' } })
+  expect(created.ok()).toBeTruthy()
+  workspaceBase = `${backend}/workspaces/${(await created.json()).id}`
+  await request.post(`${workspaceBase}/pipeline/stop`)
   await expect.poll(async () => (await workspace(request)).pipeline.status).not.toMatch(/^(running|stopping)$/)
   for (const tasklet of (await workspace(request)).tasklets) {
-    const response = await request.delete(`${backend}/tasklets/${tasklet.id}`)
+    const response = await request.delete(`${workspaceBase}/tasklets/${tasklet.id}`)
     expect(response.ok()).toBeTruthy()
   }
   const response = await request.patch(`${backend}/settings`, {
-    data: { execution_mode: 'api', working_directory: null, codex_sandbox: 'read-only', api_key: 'local-test-key', base_url: providerBaseUrl, model: 'test-model', max_parallel: 2, workspace_context: '' },
+    data: { execution_mode: 'api', codex_sandbox: 'read-only', api_key: 'local-test-key', base_url: providerBaseUrl, model: 'test-model', max_parallel: 2 },
   })
   expect(response.ok()).toBeTruthy()
   await request.post(`${provider}/reset`)
@@ -69,7 +79,8 @@ test('settings save, mask the key, test the provider, and survive reload', async
   await page.getByRole('textbox', { name: 'API Base URL', exact: true }).fill(providerBaseUrl)
   await page.getByRole('textbox', { name: 'Контекст пространства', exact: true }).fill('Общий контекст тестового проекта')
   await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).click()
-  await expect.poll(async () => (await (await request.get(`${backend}/settings`)).json()).workspace_context).toBe('Общий контекст тестового проекта')
+  await page.getByRole('button', { name: 'Сохранить пространство', exact: true }).click()
+  await expect.poll(async () => (await workspace(request)).workspace_context).toBe('Общий контекст тестового проекта')
   const settings = await (await request.get(`${backend}/settings`)).json()
   expect(settings.api_key_configured).toBe(true)
   expect(JSON.stringify(settings)).not.toContain('local-test-key')
@@ -97,6 +108,10 @@ test('tasklets can be created, edited, restored, and deleted', async ({ page, re
   await page.getByRole('textbox', { name: 'Промпт', exact: true }).fill('Подготовь подробный план [[label:plan]]')
   await page.getByRole('button', { name: 'Сохранить изменения', exact: true }).click()
   await expect.poll(async () => (await workspace(request)).tasklets[0]?.title).toBe('Уточнённый план')
+  await page.getByRole('textbox', { name: 'Модель', exact: true }).fill('temporary-model')
+  await page.getByRole('textbox', { name: 'Модель', exact: true }).fill('')
+  await expect(page.getByRole('button', { name: 'Сохранить изменения', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Запустить пайплайн', exact: true })).toBeEnabled()
   await page.reload()
   const node = page.locator('.react-flow__node').filter({ hasText: 'Уточнённый план' })
   await expect(node).toBeVisible()

@@ -59,10 +59,19 @@ async def client_for(tmp_path, provider=None):
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         ) as client,
     ):
+        client.workspace_id = (await client.get("/api/workspaces")).json()[0]["id"]
+        client.workspace_path = f"/api/workspaces/{client.workspace_id}"
         yield client, app.state.runtime
 
 
 async def configure(client, **changes):
+    local = {
+        key: changes.pop(key)
+        for key in ("workspace_context", "working_directory")
+        if key in changes
+    }
+    if local:
+        assert (await client.patch(client.workspace_path, json=local)).status_code == 200
     response = await client.patch(
         "/api/settings", json={"api_key": "private-test-key", "model": "test-model", **changes}
     )
@@ -70,14 +79,16 @@ async def configure(client, **changes):
 
 
 async def tasklet(client, title):
-    response = await client.post("/api/tasklets", json={"title": title, "prompt": title})
+    response = await client.post(
+        f"{client.workspace_path}/tasklets", json={"title": title, "prompt": title}
+    )
     assert response.status_code == 201
     return response.json()
 
 
 async def edge(client, source, target, pass_context=False):
     response = await client.post(
-        "/api/edges",
+        f"{client.workspace_path}/edges",
         json={"source": source["id"], "target": target["id"], "pass_context": pass_context},
     )
     assert response.status_code == 201
@@ -98,7 +109,7 @@ async def until(predicate):
 
 async def test_crud_settings_and_restart_persistence(tmp_path):
     async with client_for(tmp_path) as (client, runtime):
-        assert (await client.get("/api/workspace")).json()["tasklets"] == []
+        assert (await client.get(client.workspace_path)).json()["tasklets"] == []
         assert (await client.get("/api/settings")).json()["model"] == ""
         await configure(client, workspace_context="Общий контекст")
         assert "private-test-key" not in (await client.get("/api/settings")).text
@@ -112,26 +123,34 @@ async def test_crud_settings_and_restart_persistence(tmp_path):
         second = await tasklet(client, "Второй")
         link = await edge(client, first, second)
         response = await client.patch(
-            f"/api/tasklets/{first['id']}",
+            f"{client.workspace_path}/tasklets/{first['id']}",
             json={"title": "Изменён", "position": {"x": 10, "y": 20}},
         )
         assert response.json()["position"] == {"x": 10, "y": 20}
-        response = await client.patch(f"/api/edges/{link['id']}", json={"pass_context": True})
+        response = await client.patch(
+            f"{client.workspace_path}/edges/{link['id']}", json={"pass_context": True}
+        )
         assert response.json()["pass_context"] is True
-        assert (await client.post("/api/pipeline/start", json={})).status_code == 202
+        assert (
+            await client.post(f"{client.workspace_path}/pipeline/start", json={})
+        ).status_code == 202
         await finished(runtime)
     assert stat.S_IMODE((tmp_path / "aispace.sqlite3").stat().st_mode) == 0o600
     async with client_for(tmp_path) as (client, runtime):
-        workspace = (await client.get("/api/workspace")).json()
+        workspace = (await client.get(client.workspace_path)).json()
         assert workspace["pipeline"]["status"] == "completed"
         assert len(workspace["tasklets"]) == 2
-        assert (await client.get(f"/api/tasklets/{first['id']}/messages")).json()[0][
-            "content"
-        ] == "Первый"
+        assert (
+            await client.get(f"{client.workspace_path}/tasklets/{first['id']}/messages")
+        ).json()[0]["content"] == "Первый"
         assert (await client.get("/api/settings")).json()["api_key_configured"] is True
-        assert (await client.delete(f"/api/tasklets/{first['id']}")).status_code == 204
-        assert (await client.get("/api/workspace")).json()["edges"] == []
-        assert (await client.get(f"/api/tasklets/{first['id']}/messages")).status_code == 404
+        assert (
+            await client.delete(f"{client.workspace_path}/tasklets/{first['id']}")
+        ).status_code == 204
+        assert (await client.get(client.workspace_path)).json()["edges"] == []
+        assert (
+            await client.get(f"{client.workspace_path}/tasklets/{first['id']}/messages")
+        ).status_code == 404
         assert (await client.patch("/api/settings", json={"api_key": None})).json()[
             "api_key_configured"
         ] is False
@@ -148,10 +167,14 @@ async def test_edges_reject_cycles_duplicates_and_missing_nodes(tmp_path):
             (first["id"], second["id"], 409),
             (first["id"], "missing", 404),
         ]:
-            response = await client.post("/api/edges", json={"source": source, "target": target})
+            response = await client.post(
+                f"{client.workspace_path}/edges", json={"source": source, "target": target}
+            )
             assert response.status_code == status
-        assert (await client.delete(f"/api/edges/{link['id']}")).status_code == 204
-        assert len((await client.get("/api/workspace")).json()["edges"]) == 1
+        assert (
+            await client.delete(f"{client.workspace_path}/edges/{link['id']}")
+        ).status_code == 204
+        assert len((await client.get(client.workspace_path)).json()["edges"]) == 1
 
 
 async def test_parallel_dag_and_optional_context(tmp_path):
@@ -161,7 +184,7 @@ async def test_parallel_dag_and_optional_context(tmp_path):
         first, second, dependent = [await tasklet(client, name) for name in ["a", "b", "c"]]
         await edge(client, first, dependent, pass_context=True)
         await edge(client, second, dependent)
-        response = await client.post("/api/pipeline/start", json={})
+        response = await client.post(f"{client.workspace_path}/pipeline/start", json={})
         assert response.status_code == 202
         await finished(runtime)
         assert provider.maximum == 2
@@ -184,7 +207,7 @@ async def test_failed_dependency_blocks_descendants_but_not_independent(tmp_path
         ]
         await edge(client, first, second)
         await edge(client, second, third)
-        await client.post("/api/pipeline/start", json={})
+        await client.post(f"{client.workspace_path}/pipeline/start", json={})
         await finished(runtime)
         statuses = {task["title"]: task["status"] for task in runtime.store.tasklets()}
         assert statuses == {"a": "failed", "b": "blocked", "c": "blocked", "d": "completed"}
@@ -198,19 +221,29 @@ async def test_full_stop_is_idempotent_cancels_all_and_prevents_delayed_updates(
     async with client_for(tmp_path, provider) as (client, runtime):
         await configure(client, max_parallel=2)
         first, second, third = [await tasklet(client, name) for name in ["a", "b", "c"]]
-        await client.post("/api/pipeline/start", json={})
+        await client.post(f"{client.workspace_path}/pipeline/start", json={})
         await until(lambda: provider.active == 2)
         assert (
-            await client.patch(f"/api/tasklets/{first['id']}", json={"prompt": "changed"})
+            await client.patch(
+                f"{client.workspace_path}/tasklets/{first['id']}", json={"prompt": "changed"}
+            )
         ).status_code == 409
         assert (
-            await client.patch(f"/api/tasklets/{first['id']}", json={"position": {"x": 1, "y": 2}})
+            await client.patch(
+                f"{client.workspace_path}/tasklets/{first['id']}",
+                json={"position": {"x": 1, "y": 2}},
+            )
         ).status_code == 200
         assert (await client.patch("/api/settings", json={"model": "another"})).status_code == 409
-        assert (await client.post("/api/pipeline/start", json={})).status_code == 409
-        assert (await client.delete(f"/api/tasklets/{second['id']}")).status_code == 409
+        assert (
+            await client.post(f"{client.workspace_path}/pipeline/start", json={})
+        ).status_code == 409
+        assert (
+            await client.delete(f"{client.workspace_path}/tasklets/{second['id']}")
+        ).status_code == 409
         responses = await asyncio.gather(
-            client.post("/api/pipeline/stop"), client.post("/api/pipeline/stop")
+            client.post(f"{client.workspace_path}/pipeline/stop"),
+            client.post(f"{client.workspace_path}/pipeline/stop"),
         )
         assert all(response.json()["status"] == "cancelled" for response in responses)
         assert provider.active == 0
@@ -219,10 +252,14 @@ async def test_full_stop_is_idempotent_cancels_all_and_prevents_delayed_updates(
         assert all(task["status"] == "cancelled" for task in snapshot["tasklets"])
         await asyncio.sleep(0.35)
         assert runtime.store.workspace() == snapshot
-        assert (await client.post("/api/pipeline/stop")).json() == snapshot["pipeline"]
+        assert (await client.post(f"{client.workspace_path}/pipeline/stop")).json() == snapshot[
+            "pipeline"
+        ]
         assert (await client.patch("/api/settings", json={"max_parallel": 1})).status_code == 200
         provider.delay = 0.001
-        await client.post("/api/pipeline/start", json={"tasklet_ids": [third["id"]]})
+        await client.post(
+            f"{client.workspace_path}/pipeline/start", json={"tasklet_ids": [third["id"]]}
+        )
         await finished(runtime)
         assert runtime.store.pipeline()["status"] == "completed"
 
@@ -233,18 +270,26 @@ async def test_selected_task_includes_unfinished_ancestors_and_prompt_edits_inva
         await configure(client)
         first, second, unrelated = [await tasklet(client, name) for name in ["a", "b", "other"]]
         await edge(client, first, second)
-        response = await client.post("/api/pipeline/start", json={"tasklet_ids": [second["id"]]})
+        response = await client.post(
+            f"{client.workspace_path}/pipeline/start", json={"tasklet_ids": [second["id"]]}
+        )
         assert response.json()["total"] == 2
         await finished(runtime)
         assert [call["label"] for call in provider.calls] == ["a", "b"]
-        await client.patch(f"/api/tasklets/{first['id']}", json={"prompt": "a-updated"})
+        await client.patch(
+            f"{client.workspace_path}/tasklets/{first['id']}", json={"prompt": "a-updated"}
+        )
         assert runtime.store.tasklet(first["id"])["status"] == "idle"
         assert runtime.store.tasklet(second["id"])["status"] == "idle"
-        response = await client.post("/api/pipeline/start", json={"tasklet_ids": [second["id"]]})
+        response = await client.post(
+            f"{client.workspace_path}/pipeline/start", json={"tasklet_ids": [second["id"]]}
+        )
         assert response.json()["total"] == 2
         await finished(runtime)
         assert [call["label"] for call in provider.calls] == ["a", "b", "a-updated", "b"]
-        await client.post("/api/pipeline/start", json={"tasklet_ids": [first["id"]]})
+        await client.post(
+            f"{client.workspace_path}/pipeline/start", json={"tasklet_ids": [first["id"]]}
+        )
         await finished(runtime)
         assert runtime.store.tasklet(second["id"])["status"] == "idle"
         assert runtime.store.tasklet(unrelated["id"])["status"] == "idle"
@@ -255,15 +300,19 @@ async def test_chat_continues_persisted_history_and_model_override(tmp_path):
     async with client_for(tmp_path, provider) as (client, runtime):
         await configure(client)
         task = await tasklet(client, "Первый вопрос")
-        await client.patch(f"/api/tasklets/{task['id']}", json={"model": "special-model"})
-        await client.post("/api/pipeline/start", json={})
+        await client.patch(
+            f"{client.workspace_path}/tasklets/{task['id']}", json={"model": "special-model"}
+        )
+        await client.post(f"{client.workspace_path}/pipeline/start", json={})
         await finished(runtime)
         response = await client.post(
-            f"/api/tasklets/{task['id']}/messages", json={"content": "Уточнение"}
+            f"{client.workspace_path}/tasklets/{task['id']}/messages", json={"content": "Уточнение"}
         )
         assert response.status_code == 202
         await finished(runtime)
-        messages = (await client.get(f"/api/tasklets/{task['id']}/messages")).json()
+        messages = (
+            await client.get(f"{client.workspace_path}/tasklets/{task['id']}/messages")
+        ).json()
         assert [message["role"] for message in messages] == [
             "user",
             "assistant",
@@ -278,16 +327,26 @@ async def test_chat_continues_persisted_history_and_model_override(tmp_path):
 
 async def test_run_requires_valid_settings_and_nonempty_prompt(tmp_path):
     async with client_for(tmp_path) as (client, _):
-        assert (await client.post("/api/pipeline/start", json={})).status_code == 422
-        task = await tasklet(client, "a")
-        assert (await client.post("/api/pipeline/start", json={})).status_code == 422
-        await client.patch("/api/settings", json={"api_key": "key"})
-        assert (await client.post("/api/pipeline/start", json={})).status_code == 422
-        await configure(client)
-        await client.patch(f"/api/tasklets/{task['id']}", json={"prompt": ""})
-        assert (await client.post("/api/pipeline/start", json={})).status_code == 422
         assert (
-            await client.post("/api/pipeline/start", json={"tasklet_ids": ["missing"]})
+            await client.post(f"{client.workspace_path}/pipeline/start", json={})
+        ).status_code == 422
+        task = await tasklet(client, "a")
+        assert (
+            await client.post(f"{client.workspace_path}/pipeline/start", json={})
+        ).status_code == 422
+        await client.patch("/api/settings", json={"api_key": "key"})
+        assert (
+            await client.post(f"{client.workspace_path}/pipeline/start", json={})
+        ).status_code == 422
+        await configure(client)
+        await client.patch(f"{client.workspace_path}/tasklets/{task['id']}", json={"prompt": ""})
+        assert (
+            await client.post(f"{client.workspace_path}/pipeline/start", json={})
+        ).status_code == 422
+        assert (
+            await client.post(
+                f"{client.workspace_path}/pipeline/start", json={"tasklet_ids": ["missing"]}
+            )
         ).status_code == 404
         assert (
             await client.patch("/api/settings", json={"base_url": "https://user:password@host/v1"})
@@ -345,7 +404,7 @@ async def test_empty_stream_cannot_unlock_dependency(tmp_path):
         first = await tasklet(client, "a")
         second = await tasklet(client, "b")
         await edge(client, first, second)
-        await client.post("/api/pipeline/start", json={})
+        await client.post(f"{client.workspace_path}/pipeline/start", json={})
         await finished(runtime)
         assert runtime.store.tasklet(first["id"])["status"] == "failed"
         assert runtime.store.tasklet(second["id"])["status"] == "blocked"
@@ -358,7 +417,7 @@ async def test_single_worker_limit_is_respected(tmp_path):
         await configure(client, max_parallel=1)
         for name in ("a", "b", "c"):
             await tasklet(client, name)
-        await client.post("/api/pipeline/start", json={})
+        await client.post(f"{client.workspace_path}/pipeline/start", json={})
         await finished(runtime)
         assert len(provider.calls) == 3
         assert provider.maximum == 1

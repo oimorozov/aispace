@@ -19,19 +19,22 @@ def api(path, method="GET", body=None):
         return json.load(response)
 
 
-def snapshot():
-    workspace = api("workspace")
+def snapshot(workspace_id):
+    scope = f"workspaces/{workspace_id}"
+    workspace = api(scope)
     return {
         "workspace": workspace,
         "settings": api("settings"),
         "messages": {
-            item["id"]: api(f"tasklets/{item['id']}/messages")
+            item["id"]: api(f"{scope}/tasklets/{item['id']}/messages")
             for item in workspace["tasklets"]
         },
     }
 
 
 def prepare_restart_check():
+    workspace = api("workspaces", "POST", {"name": "Persistence check"})
+    scope = f"workspaces/{workspace['id']}"
     api(
         "settings",
         "PATCH",
@@ -43,30 +46,30 @@ def prepare_restart_check():
         },
     )
     first = api(
-        "tasklets",
+        f"{scope}/tasklets",
         "POST",
         {"title": "Persistence source", "prompt": "[[label:persist-source]]"},
     )
     second = api(
-        "tasklets",
+        f"{scope}/tasklets",
         "POST",
         {"title": "Persistence target", "prompt": "[[label:persist-target]]"},
     )
     api(
-        "edges",
+        f"{scope}/edges",
         "POST",
         {"source": first["id"], "target": second["id"], "pass_context": True},
     )
-    api("pipeline/start", "POST", {"tasklet_ids": [second["id"]]})
+    api(f"{scope}/pipeline/start", "POST", {"tasklet_ids": [second["id"]]})
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:
-        pipeline = api("workspace")["pipeline"]
+        pipeline = api(scope)["pipeline"]
         if pipeline["status"] == "completed":
             if all(
-                len(api(f"tasklets/{item['id']}/messages")) >= 2
+                len(api(f"{scope}/tasklets/{item['id']}/messages")) >= 2
                 for item in (first, second)
             ):
-                return
+                return workspace["id"]
             raise RuntimeError("Pipeline completed without persisted chat history")
         if pipeline["status"] not in {"running", "stopping"}:
             raise RuntimeError("Persistence check pipeline did not complete")
@@ -121,11 +124,11 @@ def main():
             run([*compose, "logs", "--no-color", "--tail", "50"], check=False)
             return result.returncode
 
-        prepare_restart_check()
-        before = snapshot()
+        workspace_id = prepare_restart_check()
+        before = snapshot(workspace_id)
         run([*compose, "restart", "backend", "frontend"])
         run([*compose, "up", "-d", "--wait"])
-        if snapshot() != before:
+        if snapshot(workspace_id) != before:
             raise RuntimeError("Data changed after restarting the containers")
         if before["settings"]["api_key_configured"]:
             result = api("settings/test", "POST")

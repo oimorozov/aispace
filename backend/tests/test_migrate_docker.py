@@ -9,8 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from aispace.models import Pipeline, TaskletCreate
-from aispace.storage import Store
+from aispace.models import Pipeline
 
 spec = importlib.util.spec_from_file_location(
     "migrate_docker", Path(__file__).resolve().parents[2] / "scripts" / "migrate_docker.py"
@@ -48,36 +47,95 @@ def create_fixture(tmp_path):
     workspace = tmp_path / "project"
     component = workspace / "component"
     component.mkdir(parents=True)
-    store = Store(staging)
-    store.save_settings(
-        {
-            "execution_mode": "codex",
-            "working_directory": "/workspace",
-            "api_key": "private-fixture-key",
-        }
+    staging.mkdir()
+    database = sqlite3.connect(staging / "aispace.sqlite3")
+    database.executescript("""
+            CREATE TABLE settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
+            CREATE TABLE tasklets (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, prompt TEXT NOT NULL,
+                model TEXT, status TEXT NOT NULL, position TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                error TEXT, last_output TEXT NOT NULL
+            );
+            CREATE TABLE edges (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL REFERENCES tasklets(id) ON DELETE CASCADE,
+                target TEXT NOT NULL REFERENCES tasklets(id) ON DELETE CASCADE,
+                pass_context INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(source, target)
+            );
+            CREATE TABLE runs (
+                id TEXT PRIMARY KEY, data TEXT NOT NULL
+            );
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                tasklet_id TEXT NOT NULL REFERENCES tasklets(id) ON DELETE CASCADE,
+                role TEXT NOT NULL, content TEXT NOT NULL,
+                created_at TEXT NOT NULL, run_id TEXT REFERENCES runs(id)
+            );
+            CREATE INDEX messages_tasklet ON messages(tasklet_id, created_at);
+            CREATE TABLE state (id INTEGER PRIMARY KEY, pipeline TEXT NOT NULL);
+            CREATE TABLE codex_sessions (
+                tasklet_id TEXT PRIMARY KEY REFERENCES tasklets(id) ON DELETE CASCADE,
+                thread_id TEXT NOT NULL, cwd TEXT NOT NULL
+            );
+    """)
+    database.execute("ALTER TABLE tasklets ADD COLUMN working_directory TEXT")
+    database.execute(
+        "INSERT INTO settings VALUES (1,?)",
+        (
+            json.dumps(
+                {
+                    "execution_mode": "codex",
+                    "working_directory": "/workspace",
+                    "api_key": "private-fixture-key",
+                }
+            ),
+        ),
     )
-    run = Pipeline(id="run-one", status="completed", total=2, completed=2).model_dump()
-    store.save_pipeline(run)
+    run = Pipeline(id="run-one", status="completed", total=2, completed=2).model_dump_json()
+    database.execute("INSERT INTO state VALUES (1,?)", (run,))
+    database.execute("INSERT INTO runs VALUES ('run-one',?)", (run,))
     pairs = []
     for index, cwd in enumerate((f"/host{workspace}", "/workspace/component")):
-        tasklet = store.create_tasklet(
-            TaskletCreate(
-                title=f"Task {index}", prompt="Original prompt", working_directory=cwd
-            ).model_dump()
-        )
+        tasklet_id = f"task-{index}"
         thread_id = f"thread-{index}"
-        store.save_codex_session(tasklet["id"], thread_id, cwd)
-        store.update_tasklet(tasklet["id"], {"status": "completed"})
+        database.execute(
+            "INSERT INTO tasklets VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                tasklet_id,
+                f"Task {index}",
+                "Original prompt",
+                None,
+                "completed",
+                '{"x":0,"y":0}',
+                "2026-09-18T12:00:00Z",
+                "2026-09-18T12:00:00Z",
+                None,
+                "",
+                cwd,
+            ),
+        )
+        database.execute("INSERT INTO codex_sessions VALUES (?,?,?)", (tasklet_id, thread_id, cwd))
         for role, content in (
             ("user", "Private original request"),
             ("assistant", "Original result"),
         ):
-            store.create_message(tasklet["id"], role, content, run["id"])
-        pairs.append((tasklet["id"], thread_id, cwd))
-    store.create_edge(
-        {"id": "edge-one", "source": pairs[0][0], "target": pairs[1][0], "pass_context": False}
-    )
-    store.close()
+            database.execute(
+                "INSERT INTO messages VALUES (?,?,?,?,?,?)",
+                (
+                    f"message-{index}-{role}",
+                    tasklet_id,
+                    role,
+                    content,
+                    "2026-09-18T12:00:00Z",
+                    "run-one",
+                ),
+            )
+        pairs.append((tasklet_id, thread_id, cwd))
+    database.execute("INSERT INTO edges VALUES ('edge-one',?,?,0)", (pairs[0][0], pairs[1][0]))
+    database.commit()
+    database.close()
     codex = staging / "codex"
     sessions = codex / "sessions"
     sessions.mkdir(parents=True)
