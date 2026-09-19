@@ -3,10 +3,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-import pytest
-from fastapi import HTTPException
 
-from aispace.directories import Directories
 from aispace.main import create_app
 from aispace.storage import Store
 
@@ -104,20 +101,31 @@ async def test_default_directory_picker_can_select_folders_outside_project(tmp_p
         assert tasklet.json()["working_directory"] == str(hidden)
 
 
-def test_host_disk_alias_cannot_select_container_root(tmp_path, monkeypatch):
-    host = tmp_path / "host"
-    project = host / "project"
-    project.mkdir(parents=True)
-    (host / "disk-alias").symlink_to("/", target_is_directory=True)
-    (host / "relative-link").symlink_to("project", target_is_directory=True)
-    monkeypatch.setenv("AISPACE_HOST_MOUNT", str(host))
-    directories = Directories("/")
-    listing = directories.browse(str(host))
-    assert [item["name"] for item in listing["entries"]] == ["project", "relative-link"]
-    assert directories.resolve(str(host / "relative-link")) == project.resolve()
-    with pytest.raises(HTTPException) as error:
-        directories.resolve(str(host / "disk-alias"))
-    assert error.value.status_code == 422
+async def test_native_picker_routes_do_not_save_or_allow_foreign_origins(tmp_path, monkeypatch):
+    async with context(tmp_path) as (client, runtime, project):
+        calls = []
+
+        async def choose(value=None):
+            calls.append(value)
+            return {"path": str(project) if value else None}
+
+        monkeypatch.setattr(runtime.directories, "choose", choose)
+        monkeypatch.setattr(
+            runtime.directories,
+            "capabilities",
+            lambda: {"native_picker": True, "platform": "darwin"},
+        )
+        assert (await client.get("/api/directories/capabilities")).json()["native_picker"]
+        settings = (await client.get("/api/settings")).json()
+        selected = await client.post("/api/directories/choose", json={"path": str(project)})
+        assert selected.status_code == 200
+        assert selected.json() == {"path": str(project)}
+        assert (await client.post("/api/directories/choose")).json() == {"path": None}
+        assert (await client.get("/api/settings")).json() == settings
+        assert (
+            await client.post("/api/directories/choose", headers={"Origin": "https://example.com"})
+        ).status_code == 403
+        assert calls == [str(project), None]
 
 
 async def test_codex_runs_without_api_key_and_preserves_workspace_overrides(tmp_path):

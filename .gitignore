@@ -1,4 +1,6 @@
 .data/
+.data.import-*/
+/issues/
 .venv/
 __pycache__/
 *.py[cod]

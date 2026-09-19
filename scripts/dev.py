@@ -10,6 +10,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def native_environment():
+    environment = os.environ.copy()
+    data = Path(environment.get("AISPACE_DATA_DIR", ROOT / ".data")).resolve()
+    environment.setdefault("AISPACE_DATA_DIR", str(data))
+    migrated_codex = data / "codex"
+    if migrated_codex.is_dir():
+        environment.setdefault("AISPACE_CODEX_HOME", str(migrated_codex))
+    return environment
+
+
 def available(port):
     with socket.socket() as connection:
         connection.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -57,7 +67,9 @@ def main():
     try:
         for command in commands:
             processes.append(
-                subprocess.Popen(command, cwd=ROOT, start_new_session=True)
+                subprocess.Popen(
+                    command, cwd=ROOT, env=native_environment(), start_new_session=True
+                )
             )
         while all(process.poll() is None for process in processes):
             time.sleep(0.2)

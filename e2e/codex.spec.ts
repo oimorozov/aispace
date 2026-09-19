@@ -41,7 +41,9 @@ async function selectFolder(page: Page, field: string, folders: string[]) {
   return selected
 }
 
-test.beforeEach(async ({ request }) => {
+test.beforeEach(async ({ page, request }) => {
+  await page.route('**/api/directories/capabilities', route => route.fulfill({ json: { native_picker: false, platform: 'linux' } }))
+  await page.route('**/api/directories/choose', route => route.fulfill({ status: 501, json: { detail: 'Системный выбор папки не включён в этом сценарии' } }))
   await request.post(`${backend}/pipeline/stop`)
   await expect.poll(async () => (await workspace(request)).pipeline.status).not.toMatch(/^(running|stopping)$/)
   for (const tasklet of (await workspace(request)).tasklets) {
@@ -135,6 +137,73 @@ test('directory picker leaves a saved nested directory through the root and sele
   await page.reload()
   await page.getByRole('button', { name: 'Настройки', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true })).toContainText(other)
+})
+
+test('native directory picker opens only on click and saves the selected host path', async ({ page, request }, testInfo) => {
+  const settings = await (await request.get(`${backend}/settings`)).json()
+  const selected = `${settings.working_directory.replace(/\/$/, '')}/other`
+  const calls: { method: string; path: string | null }[] = []
+  let finish: () => void = () => {}
+  const result = new Promise<void>(resolve => { finish = resolve })
+  await page.route('**/api/directories/capabilities', route => route.fulfill({ json: { native_picker: true, platform: 'darwin' } }))
+  await page.route('**/api/directories/choose', async route => {
+    calls.push({ method: route.request().method(), path: route.request().postDataJSON().path })
+    await result
+    await route.fulfill({ json: { path: selected } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Настройки', exact: true }).click()
+  await page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Рабочая папка', exact: true })
+  await expect(dialog.getByRole('button', { name: 'Выбрать в Finder…', exact: true })).toBeVisible()
+  await expect(dialog.getByRole('textbox', { name: 'Путь к папке', exact: true })).toHaveValue(settings.working_directory)
+  expect(calls).toEqual([])
+  await page.screenshot({ path: testInfo.outputPath('native-directory-picker.png'), fullPage: true })
+  await dialog.getByRole('button', { name: 'Выбрать в Finder…', exact: true }).click()
+  await expect(dialog.getByRole('button', { name: 'Выберите папку в Finder…', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: 'Выбрать папку', exact: true })).toBeDisabled()
+  await expect.poll(() => calls).toEqual([{ method: 'POST', path: settings.working_directory }])
+  finish()
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true })).toContainText(selected)
+  await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).click()
+  await expect.poll(async () => (await (await request.get(`${backend}/settings`)).json()).working_directory).toBe(selected)
+})
+
+test('cancelling the native directory picker preserves the current directory', async ({ page, request }) => {
+  const settings = await (await request.get(`${backend}/settings`)).json()
+  await page.route('**/api/directories/capabilities', route => route.fulfill({ json: { native_picker: true, platform: 'darwin' } }))
+  await page.route('**/api/directories/choose', route => route.fulfill({ json: { path: null } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Настройки', exact: true }).click()
+  await page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Рабочая папка', exact: true })
+  await dialog.getByRole('button', { name: 'Выбрать в Finder…', exact: true }).click()
+  await expect(dialog.getByText('Выбор отменён. Можно выбрать папку в списке ниже.', { exact: true })).toBeVisible()
+  await expect(dialog.getByRole('textbox', { name: 'Путь к папке', exact: true })).toHaveValue(settings.working_directory)
+  await expect(dialog.getByRole('button', { name: 'Выбрать папку', exact: true })).toBeEnabled()
+  await dialog.getByRole('button', { name: 'Закрыть выбор папки', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true })).toContainText(settings.working_directory)
+  await expect(page.getByRole('button', { name: 'Сохранить настройки', exact: true })).toBeDisabled()
+  expect((await (await request.get(`${backend}/settings`)).json()).working_directory).toBe(settings.working_directory)
+})
+
+test('native directory picker errors keep the browser directory fallback usable', async ({ page, request }) => {
+  const settings = await (await request.get(`${backend}/settings`)).json()
+  const selected = `${settings.working_directory.replace(/\/$/, '')}/demo`
+  await page.route('**/api/directories/capabilities', route => route.fulfill({ json: { native_picker: true, platform: 'darwin' } }))
+  await page.route('**/api/directories/choose', route => route.fulfill({ status: 503, json: { detail: 'Не удалось открыть Finder. Выберите папку в списке.' } }))
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Настройки', exact: true }).click()
+  await page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'Рабочая папка', exact: true })
+  await dialog.getByRole('button', { name: 'Выбрать в Finder…', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toHaveText('Не удалось открыть Finder. Выберите папку в списке.')
+  await dialog.getByRole('button', { name: 'demo', exact: true }).click()
+  await expect(dialog.getByRole('textbox', { name: 'Путь к папке', exact: true })).toHaveValue(selected)
+  await dialog.getByRole('button', { name: 'Выбрать папку', exact: true }).click()
+  await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).click()
+  await expect.poll(async () => (await (await request.get(`${backend}/settings`)).json()).working_directory).toBe(selected)
 })
 
 test('stopping from a Codex chat interrupts both active turns and cancels queued dependencies', async ({ page, request }, testInfo) => {

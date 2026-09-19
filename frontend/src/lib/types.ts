@@ -79,6 +79,11 @@ export interface DirectoryListing {
   roots: string[]
 }
 
+export interface DirectoryCapabilities {
+  native_picker: boolean
+  platform: string
+}
+
 export type SettingsUpdate = Partial<Omit<Settings, 'api_key_configured'>> & { api_key?: string | null }
 
 export const statusLabels: Record<TaskletStatus, string> = {

@@ -153,3 +153,7 @@ class Workspace(BaseModel):
     tasklets: list[Tasklet]
     edges: list[Edge]
     pipeline: Pipeline
+
+
+class DirectoryChoose(BaseModel):
+    path: str | None = Field(default=None, max_length=4096)

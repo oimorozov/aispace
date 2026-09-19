@@ -7,10 +7,12 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from .codex import CodexProvider
 from .directories import Directories
 from .models import (
+    DirectoryChoose,
     Edge,
     EdgeCreate,
     EdgePatch,
@@ -31,7 +33,9 @@ from .runtime import Runtime
 from .storage import Store
 
 
-def create_app(data_dir=None, provider=None, codex_provider=None, workspace_root=None):
+def create_app(
+    data_dir=None, provider=None, codex_provider=None, workspace_root=None, frontend_dir=None
+):
     @asynccontextmanager
     async def lifespan(application):
         directory = Path(
@@ -241,6 +245,14 @@ def create_app(data_dir=None, provider=None, codex_provider=None, workspace_root
     async def directories(path: str | None = None):
         return runtime().directories.browse(path)
 
+    @application.get("/api/directories/capabilities")
+    async def directory_capabilities():
+        return runtime().directories.capabilities()
+
+    @application.post("/api/directories/choose")
+    async def choose_directory(body: DirectoryChoose | None = None):
+        return await runtime().directories.choose(body.path if body else None)
+
     @application.get("/api/codex/status")
     async def codex_status():
         return await runtime().codex.status()
@@ -295,6 +307,10 @@ def create_app(data_dir=None, provider=None, codex_provider=None, workspace_root
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    static_directory = frontend_dir or os.environ.get("AISPACE_FRONTEND_DIR")
+    if static_directory:
+        application.mount("/", StaticFiles(directory=static_directory, html=True), name="frontend")
 
     return application
 

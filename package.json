@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "start": "python3 scripts/start.py",
     "dev": "python3 scripts/dev.py",
     "build": "npm --prefix frontend run build",
     "test": "uv run --package aispace-backend pytest backend/tests && npm --prefix frontend run build",

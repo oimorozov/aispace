@@ -1,4 +1,4 @@
-import type { CodexLogin, CodexStatus, Dependency, DirectoryListing, Message, Pipeline, Settings, SettingsUpdate, Tasklet, Workspace } from './types'
+import type { CodexLogin, CodexStatus, Dependency, DirectoryCapabilities, DirectoryListing, Message, Pipeline, Settings, SettingsUpdate, Tasklet, Workspace } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response
@@ -31,6 +31,8 @@ export const api = {
   cancelCodexLogin: (login_id: string) => request<void>('/codex/login/cancel', { method: 'POST', body: body({ login_id }) }),
   codexLogout: () => request<void>('/codex/logout', { method: 'POST' }),
   directories: (path?: string) => request<DirectoryListing>(`/directories${path ? `?path=${encodeURIComponent(path)}` : ''}`),
+  directoryCapabilities: () => request<DirectoryCapabilities>('/directories/capabilities'),
+  chooseDirectory: (path?: string | null) => request<{ path: string | null }>('/directories/choose', { method: 'POST', body: body({ path: path || null }) }),
   createTasklet: (value: Pick<Tasklet, 'title' | 'prompt' | 'position'>) => request<Tasklet>('/tasklets', { method: 'POST', body: body(value) }),
   updateTasklet: (id: string, value: Partial<Pick<Tasklet, 'title' | 'prompt' | 'model' | 'position' | 'working_directory'>>) => request<Tasklet>(`/tasklets/${id}`, { method: 'PATCH', body: body(value) }),
   deleteTasklet: (id: string) => request<void>(`/tasklets/${id}`, { method: 'DELETE' }),
