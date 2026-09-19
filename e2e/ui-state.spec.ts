@@ -234,7 +234,7 @@ test('malformed snapshots and inaccessible storage leave the app usable without 
   expect(mutations).toEqual([])
 })
 
-test('refresh never resumes pending device login and excludes login data from storage', async ({ page }) => {
+test('refresh never resumes pending device login and excludes login data from storage', async ({ page }, testInfo) => {
   await page.route('**/api/codex/status', route => route.fulfill({ json: { available: true, authenticated: false, auth_type: null, account_label: null, message: 'Выполните вход', capabilities: { workspace: true, commands: [] } } }))
   await page.route('**/api/codex/login', route => route.fulfill({ json: { login_id: 'private-login-id', auth_url: 'https://example.invalid/login', user_code: 'PRIVATE-CODE' } }))
   await page.goto('/')
@@ -242,6 +242,7 @@ test('refresh never resumes pending device login and excludes login data from st
   await page.getByRole('button', { name: 'ChatGPT Подписка через Codex', exact: true }).click()
   await page.getByRole('button', { name: 'Войти через ChatGPT', exact: true }).click()
   await expect(page.getByText('PRIVATE-CODE', { exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('device-login.png'), fullPage: true })
   const mutations = writes(page)
   await page.reload()
   await expect(page.getByRole('button', { name: 'Войти через ChatGPT', exact: true })).toBeVisible()

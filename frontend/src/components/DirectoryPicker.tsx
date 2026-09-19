@@ -54,8 +54,7 @@ export function DirectoryPicker({ value, state, onStateChange, onSelect, onClose
   }
 
   return <dialog ref={dialog} className="modal directory-modal" aria-labelledby="directory-title" onCancel={event => { if (nativePending) event.preventDefault(); else onClose() }} onClick={event => { if (event.target === dialog.current && !nativePending) onClose() }}>
-    <div className="modal-heading"><div><span className="eyebrow">КОНТЕКСТ ПРОЕКТА</span><h2 id="directory-title">Рабочая папка</h2></div><button className="icon-button" aria-label="Закрыть выбор папки" onClick={onClose} disabled={nativePending}><X size={18} /></button></div>
-    <p className="directory-description">Выберите папку на компьютере, где запущен aispace.</p>
+    <div className="modal-heading"><div><h2 id="directory-title">Рабочая папка</h2></div><button className="icon-button" aria-label="Закрыть выбор папки" onClick={onClose} disabled={nativePending}><X size={18} /></button></div>
     {nativeAvailable && <button type="button" className="button button-primary full-width directory-native" onClick={() => void chooseNative()} disabled={nativePending}>{nativePending ? <LoaderCircle size={15} className="spin" /> : <FolderOpen size={15} />}{nativePending ? 'Выберите папку в Finder…' : 'Выбрать в Finder…'}</button>}
     {nativeMessage && <div className={`notice small ${nativeMessage.error ? 'error-notice' : ''}`} role={nativeMessage.error ? 'alert' : 'status'}>{nativeMessage.text}</div>}
     {listing && listing.roots.length > 1 && <label className="field">Доступные каталоги<select aria-label="Доступные каталоги" value={listing.roots.find(root => listing.path === root || listing.path.startsWith(`${root}/`)) || ''} onChange={event => void navigate(event.target.value)} disabled={loading || nativePending}>{listing.roots.map(root => <option value={root} key={root}>{root}</option>)}</select></label>}
