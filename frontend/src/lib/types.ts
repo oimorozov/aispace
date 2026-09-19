@@ -14,6 +14,7 @@ export interface Tasklet {
   updated_at: string
   error: string | null
   last_output: string
+  source?: { provider: 'github'; repository: GitHubRepository; issue: GitHubSelection['issues'][number]; imported_at: string } | null
 }
 
 export interface Dependency {
@@ -21,6 +22,8 @@ export interface Dependency {
   source: string
   target: string
   pass_context: boolean
+  origin?: ImportEdge['origin'] | null
+  explanation?: string | null
 }
 
 export interface Message {
@@ -147,3 +150,60 @@ export const statusLabels: Record<TaskletStatus, string> = {
   cancelled: 'Остановлен',
   blocked: 'Заблокирован',
 }
+
+export type ImportSelection = GitHubSelection
+
+export interface ImportEdge {
+  source: number
+  target: number
+  origin: 'github' | 'description' | 'ai' | 'user'
+  explanation: string
+}
+
+export interface ImportDecision {
+  kind: 'external_completed' | 'ignore_github'
+  source: number
+  target: number
+  reason: string
+}
+
+export interface ImportBlocker {
+  source: number
+  target: number
+  issue: { id: number; number: number; repository: string; url: string; title: string; state: 'open' | 'closed' }
+}
+
+export interface ImportGraph {
+  edges: ImportEdge[]
+  external_blockers: ImportBlocker[]
+  positions: Record<string, { x: number; y: number }>
+}
+
+export interface ImportPlan extends ImportGraph {
+  id: string
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  selection_id: string
+  selection: ImportSelection
+  error: string | null
+}
+
+export interface ImportPayload {
+  plan_id: string
+  operation_id: string
+  name: string
+  working_directory: string | null
+  edges: Pick<ImportEdge, 'source' | 'target' | 'explanation'>[]
+  decisions: ImportDecision[]
+}
+
+export interface ImportClient {
+  createPlan: (selectionId: string, mode: 'ai' | 'known') => Promise<ImportPlan>
+  getPlan: (id: string) => Promise<ImportPlan>
+  cancelPlan: (id: string) => Promise<ImportPlan>
+  validatePlan: (id: string, edges: ImportPayload['edges'], decisions: ImportDecision[]) => Promise<ImportGraph>
+  createImport: (payload: ImportPayload) => Promise<Workspace>
+  selectIssues: (selection: ImportSelection, issues: { id: number; number: number }[]) => Promise<ImportSelection>
+}
+
+
+export const dependencyOrigins = { github: 'GitHub', description: 'Описание issue', ai: 'Вывод AI', user: 'Пользователь' }

@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
-import { ArrowDownToLine, ArrowUp, Check, FolderOpen, Link2, LoaderCircle, MessageSquare, Play, Square, Trash2, X } from 'lucide-react'
+import { ArrowDownToLine, ArrowUp, Check, ExternalLink, FolderOpen, Link2, LoaderCircle, MessageSquare, Play, Square, Trash2, X } from 'lucide-react'
 import type { Dependency, Message, Settings, Tasklet } from '../lib/types'
-import { statusLabels } from '../lib/types'
+import { dependencyOrigins, statusLabels } from '../lib/types'
 import { clearMatching, patchTaskletUi, patchWorkspaceUi, taskletUi, useWorkspaceUi, type TaskletDraft } from '../lib/uiState'
 import { MessageContent } from './MessageContent'
 import { DirectoryField, DirectoryPicker } from './DirectoryPicker'
@@ -80,6 +80,7 @@ export function Inspector({ workspaceId, workingDirectory, runBlocked, runBlocke
       <div className="inspector-heading"><span className="eyebrow">ТАСКЛЕТ</span><div className="inspector-heading-actions"><button className="icon-button delete-button" aria-label="Удалить тасклет" onClick={onDelete} disabled={locked || pending}><Trash2 size={16} /></button><button className="icon-button" aria-label="Закрыть редактор" onClick={close}><X size={18} /></button></div></div>
       <h2 className="inspector-title">{tasklet.title}</h2>
       <div className="inspector-status"><span className={`status-label status-${tasklet.status}`}><span className="status-dot" />{statusLabels[tasklet.status]}</span></div>
+      {tasklet.source?.provider === 'github' && <div className="tasklet-source" aria-label="Источник тасклета"><a href={tasklet.source.issue.url} target="_blank" rel="noopener noreferrer">{tasklet.source.repository.full_name}#{tasklet.source.issue.number}<ExternalLink size={12} /></a><span>GitHub: {tasklet.source.issue.state === 'open' ? 'Открыта' : 'Закрыта'}</span></div>}
       <div className="inspector-tabs" role="tablist" aria-label="Тасклет"><button role="tab" aria-selected={tab === 'task'} onClick={() => setTab('task')}>Задача</button><button role="tab" aria-selected={tab === 'chat'} onClick={() => setTab('chat')}>Чат{messages.length > 0 && <span className="tab-count">{messages.filter(item => item.role !== 'system').length}</span>}</button></div>
       {tab === 'task' ? <div className="inspector-body" ref={taskBody} onScroll={event => patch({ taskScroll: event.currentTarget.scrollTop })}>
         {locked && <div className="notice small">Пайплайн выполняется. Редактирование будет доступно после остановки.</div>}
@@ -94,7 +95,7 @@ export function Inspector({ workspaceId, workingDirectory, runBlocked, runBlocke
           <button className="button button-secondary full-width save-tasklet" disabled={locked || pending || !dirty || !title.trim()}><Check size={15} />{pending ? 'Сохраняем…' : 'Сохранить изменения'}</button>
         </form>
         <section className="dependencies-section"><div className="subsection-heading"><h3><Link2 size={14} />Зависимости</h3><span>{incoming.length}</span></div>
-          {incoming.map(edge => { const parent = tasklets.find(item => item.id === edge.source); return <div className="dependency-item" key={edge.id}><div className="dependency-title"><ArrowDownToLine size={13} /><span>{parent?.title || 'Тасклет'}</span><button className="icon-button" aria-label={`Удалить зависимость: ${parent?.title}`} onClick={() => void perform(() => onDeleteEdge(edge.id))} disabled={locked || pending}><X size={13} /></button></div><label className="checkbox-field"><input type="checkbox" checked={edge.pass_context} aria-label={`Передавать результат: ${parent?.title}`} onChange={event => void perform(() => onUpdateEdge(edge.id, event.target.checked))} disabled={locked || pending} />Передавать результат в контекст</label></div> })}
+          {incoming.map(edge => { const parent = tasklets.find(item => item.id === edge.source); return <div className="dependency-item" key={edge.id}><div className="dependency-title"><ArrowDownToLine size={13} /><span>{parent?.title || 'Тасклет'}</span><button className="icon-button" aria-label={`Удалить зависимость: ${parent?.title}`} onClick={() => void perform(() => onDeleteEdge(edge.id))} disabled={locked || pending}><X size={13} /></button></div>{edge.origin && <p className="dependency-source"><strong>{dependencyOrigins[edge.origin]}</strong>{edge.explanation && <span>{edge.explanation}</span>}</p>}<label className="checkbox-field"><input type="checkbox" checked={edge.pass_context} aria-label={`Передавать результат: ${parent?.title}`} onChange={event => void perform(() => onUpdateEdge(edge.id, event.target.checked))} disabled={locked || pending} />Передавать результат в контекст</label></div> })}
           {available.length > 0 && <div className="add-dependency"><select aria-label="Добавить зависимость" value={source} onChange={event => setSource(event.target.value)} disabled={locked || pending}><option value="">Выбрать тасклет…</option>{available.map(item => <option value={item.id} key={item.id}>{item.title}</option>)}</select><button className="button button-secondary" disabled={!source || locked || pending} onClick={() => void perform(async () => { await onConnect(source, tasklet.id); setSource('') })}>Связать</button></div>}
           {incoming.length === 0 && <div className="dependency-empty">Нет зависимостей</div>}
         </section>

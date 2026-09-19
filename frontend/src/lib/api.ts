@@ -1,4 +1,4 @@
-import type { ChatReset, CodexLogin, CodexStatus, Dependency, DirectoryCapabilities, DirectoryListing, GitHubIssue, GitHubRepository, GitHubSelection, Message, Pipeline, Settings, SettingsUpdate, Tasklet, Workspace, WorkspaceSummary } from './types'
+import type { ChatReset, CodexLogin, CodexStatus, Dependency, DirectoryCapabilities, DirectoryListing, GitHubIssue, GitHubRepository, GitHubSelection, ImportClient, ImportDecision, ImportGraph, ImportPayload, ImportPlan, Message, Pipeline, Settings, SettingsUpdate, Tasklet, Workspace, WorkspaceSummary } from './types'
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   let response: Response
@@ -29,8 +29,13 @@ export const api = {
   githubConnection: () => request<{ token_configured: boolean }>('/github/connection'),
   updateGitHubConnection: (token: string | null) => request<{ token_configured: boolean }>('/github/connection', { method: 'PATCH', body: body({ token }) }),
   githubRepository: (repository: string) => request<{ repository: GitHubRepository; issues: GitHubIssue[] }>('/github/repository', { method: 'POST', body: body({ repository }) }),
-  githubSelection: (repository: GitHubRepository, issues: GitHubIssue[]) => request<GitHubSelection>('/github/selections', { method: 'POST', body: body({ repository: repository.full_name, repository_id: repository.id, issues: issues.map(({ id, number }) => ({ id, number })) }) }),
+  githubSelection: (repository: GitHubRepository, issues: Pick<GitHubIssue, 'id' | 'number'>[]) => request<GitHubSelection>('/github/selections', { method: 'POST', body: body({ repository: repository.full_name, repository_id: repository.id, issues: issues.map(({ id, number }) => ({ id, number })) }) }),
   getGitHubSelection: (id: string) => request<GitHubSelection>(`/github/selections/${id}`),
+  createGitHubPlan: (selection_id: string, mode: 'ai' | 'known') => request<ImportPlan>('/github/plans', { method: 'POST', body: body({ selection_id, mode }) }),
+  githubPlan: (id: string) => request<ImportPlan>(`/github/plans/${id}`),
+  cancelGitHubPlan: (id: string) => request<ImportPlan>(`/github/plans/${id}`, { method: 'DELETE' }),
+  validateGitHubPlan: (id: string, edges: ImportPayload['edges'], decisions: ImportDecision[]) => request<ImportGraph>(`/github/plans/${id}/validate`, { method: 'POST', body: body({ edges, decisions }) }),
+  importGitHubPlan: (payload: ImportPayload) => request<Workspace>('/github/imports', { method: 'POST', body: body(payload) }),
   workspaces: () => request<WorkspaceSummary[]>('/workspaces'),
   createWorkspace: (name: string) => request<Workspace>('/workspaces', { method: 'POST', body: body({ name }) }),
   workspace: (wid: string) => request<Workspace>(`/workspaces/${wid}`),
@@ -76,4 +81,13 @@ export function subscribe(handlers: {
   source.addEventListener('chat_reset', event => handlers.chatReset(JSON.parse(event.data)))
   source.addEventListener('settings', event => handlers.settings(JSON.parse(event.data)))
   return () => source.close()
+}
+
+export const githubImportClient: ImportClient = {
+  createPlan: api.createGitHubPlan,
+  getPlan: api.githubPlan,
+  cancelPlan: api.cancelGitHubPlan,
+  validatePlan: api.validateGitHubPlan,
+  createImport: api.importGitHubPlan,
+  selectIssues: (selection, issues) => request<GitHubSelection>(`/github/selections/${selection.id}/revise`, { method: 'POST', body: body({ issues }) }),
 }
