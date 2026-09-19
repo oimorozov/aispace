@@ -50,6 +50,7 @@ export const api = {
   messages: (wid: string, id: string) => request<Message[]>(`/workspaces/${wid}/tasklets/${id}/messages`),
   sendMessage: (wid: string, id: string, content: string) => request<Pipeline>(`/workspaces/${wid}/tasklets/${id}/messages`, { method: 'POST', body: body({ content }) }),
   start: (wid: string, ids?: string[]) => request<Pipeline>(`/workspaces/${wid}/pipeline/start`, { method: 'POST', body: body(ids ? { tasklet_ids: ids } : {}) }),
+  restart: (wid: string, id: string) => request<Pipeline>(`/workspaces/${wid}/tasklets/${id}/restart`, { method: 'POST' }),
   stop: (wid: string) => request<Pipeline>(`/workspaces/${wid}/pipeline/stop`, { method: 'POST' }),
 }
 

@@ -211,7 +211,12 @@ class Runtime:
             )
             self.events.publish("message", message)
 
-    async def start(self, selected=None, followup=None, workspace_id=None, *, reset_context=True):
+    async def restart(self, tasklet_id, workspace_id=None):
+        return await self.start([tasklet_id], workspace_id=workspace_id, exact=True)
+
+    async def start(
+        self, selected=None, followup=None, workspace_id=None, *, reset_context=True, exact=False
+    ):
         async with self.lock:
             workspace_id = self.require_workspace(workspace_id)["id"]
             self.ensure_idle()
@@ -228,12 +233,28 @@ class Runtime:
             for edge in edges:
                 parents[edge["target"]].add(edge["source"])
             pending = list(chosen)
+            ancestors = set()
             while pending:
                 current = pending.pop()
                 for parent in parents[current]:
-                    if parent not in chosen and all_tasks[parent]["status"] != "completed":
+                    if exact:
+                        if parent not in ancestors:
+                            ancestors.add(parent)
+                            pending.append(parent)
+                    elif parent not in chosen and all_tasks[parent]["status"] != "completed":
                         chosen.add(parent)
                         pending.append(parent)
+            incomplete = [
+                all_tasks[parent]["title"]
+                for parent in sorted(ancestors)
+                if all_tasks[parent]["status"] != "completed"
+            ]
+            if incomplete:
+                names = ", ".join(f"«{title}»" for title in incomplete)
+                raise HTTPException(
+                    409,
+                    f"Сначала завершите зависимости: {names}. Запустите их отдельно или весь пайплайн.",
+                )
             settings = self.store.settings(private=True, workspace_id=workspace_id)
             codex_mode = settings["execution_mode"] == "codex"
             if codex_mode:

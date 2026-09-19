@@ -242,6 +242,14 @@ def create_app(
             current.changed(workspace_id)
             return Response(status_code=204)
 
+    @application.post(
+        "/api/workspaces/{workspace_id}/tasklets/{tasklet_id}/restart",
+        response_model=Pipeline,
+        status_code=202,
+    )
+    async def restart_tasklet(workspace_id: str, tasklet_id: str):
+        return await runtime().restart(tasklet_id, workspace_id)
+
     @application.get(
         "/api/workspaces/{workspace_id}/tasklets/{tasklet_id}/messages",
         response_model=list[Message],
