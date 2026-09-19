@@ -373,7 +373,9 @@ async def test_sse_initial_list_and_updates_carry_workspace_ownership(tmp_path):
         async def receive():
             return {"type": "http.request", "body": b"", "more_body": False}
 
-        endpoint = next(route.endpoint for route in app.routes if route.path == "/api/events")
+        endpoint = next(
+            route.endpoint for route in app.routes if getattr(route, "path", None) == "/api/events"
+        )
         response = await endpoint(
             Request(
                 {"type": "http", "method": "GET", "path": "/api/events", "headers": []}, receive

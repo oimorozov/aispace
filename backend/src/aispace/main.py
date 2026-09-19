@@ -11,6 +11,8 @@ from fastapi.staticfiles import StaticFiles
 
 from .codex import CodexProvider
 from .directories import Directories
+from .github import GitHubClient
+from .github_api import github_router
 from .models import (
     DirectoryChoose,
     Edge,
@@ -37,7 +39,12 @@ from .storage import Store
 
 
 def create_app(
-    data_dir=None, provider=None, codex_provider=None, workspace_root=None, frontend_dir=None
+    data_dir=None,
+    provider=None,
+    codex_provider=None,
+    workspace_root=None,
+    frontend_dir=None,
+    github_client_factory=GitHubClient,
 ):
     @asynccontextmanager
     async def lifespan(application):
@@ -51,11 +58,13 @@ def create_app(
         codex = codex_provider or CodexProvider(store, directories)
         runtime = Runtime(store, provider or ChatProvider(), codex, directories)
         application.state.runtime = runtime
+        application.state.github = github_client_factory(store)
         try:
             yield
         finally:
             await runtime.stop()
             await codex.close()
+            await application.state.github.close()
             store.close()
 
     application = FastAPI(
@@ -76,6 +85,7 @@ def create_app(
         for origin in os.environ.get("AISPACE_ALLOWED_ORIGINS", "").split(",")
         if origin.strip()
     )
+    application.include_router(github_router(lambda: application.state.github))
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(request, error):
