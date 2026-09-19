@@ -42,11 +42,13 @@ async def main():
         store.save_settings(
             {
                 "execution_mode": "codex",
-                "working_directory": str(workspace),
                 "codex_sandbox": "read-only",
                 "model": "",
                 "max_parallel": 2,
             }
+        )
+        store.update_workspace(
+            store.default_workspace_id, {"working_directory": str(workspace)}
         )
         report = {}
         try:
@@ -91,7 +93,9 @@ async def main():
             assert goal_result["status"] == "completed", goal_result["error"]
             assert nonce in goal_result["last_output"]
             inspected = await codex.command(
-                goal_task, store.settings(private=True), "/goal"
+                goal_task,
+                store.settings(private=True, workspace_id=store.default_workspace_id),
+                "/goal",
             )
             assert "выполнена" in inspected, inspected
             report["native_goal_completed"] = True
@@ -142,7 +146,9 @@ async def main():
                 )
             assert store.codex_session(waiting["id"]) is None
             inspected = await codex.command(
-                slow[0], store.settings(private=True), "/goal"
+                slow[0],
+                store.settings(private=True, workspace_id=store.default_workspace_id),
+                "/goal",
             )
             assert "на паузе" in inspected, inspected
             report["two_native_turns_interrupted"] = True

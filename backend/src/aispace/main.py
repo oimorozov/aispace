@@ -27,6 +27,9 @@ from .models import (
     TaskletCreate,
     TaskletPatch,
     Workspace,
+    WorkspaceCreate,
+    WorkspacePatch,
+    WorkspaceSummary,
 )
 from .provider import ChatProvider, ProviderError
 from .runtime import Runtime
@@ -106,29 +109,81 @@ def create_app(
     async def health():
         return {"status": "ok"}
 
-    @application.get("/api/workspace", response_model=Workspace)
-    async def workspace():
-        return runtime().store.workspace()
+    @application.get("/api/workspaces", response_model=list[WorkspaceSummary])
+    async def workspaces():
+        return runtime().store.workspaces()
 
-    @application.post("/api/tasklets", response_model=Tasklet, status_code=201)
-    async def create_tasklet(body: TaskletCreate):
+    @application.post("/api/workspaces", response_model=Workspace, status_code=201)
+    async def create_workspace(body: WorkspaceCreate):
         current = runtime()
         async with current.lock:
-            current.ensure_idle()
+            workspace = current.store.create_workspace(body.model_dump())
+            current.changed(workspace["id"])
+            return workspace
+
+    @application.get("/api/workspaces/{workspace_id}", response_model=Workspace)
+    async def workspace(workspace_id: str):
+        current = runtime()
+        current.require_workspace(workspace_id)
+        return current.store.workspace(workspace_id)
+
+    @application.patch("/api/workspaces/{workspace_id}", response_model=Workspace)
+    async def update_workspace(workspace_id: str, body: WorkspacePatch):
+        current = runtime()
+        async with current.lock:
+            previous = current.require_workspace(workspace_id)
+            current.ensure_idle(workspace_id)
+            changes = body.model_dump(exclude_unset=True)
+            if changes.get("working_directory"):
+                changes["working_directory"] = str(
+                    current.directories.resolve(changes["working_directory"])
+                )
+            if any(
+                key in changes and previous[key] != changes[key]
+                for key in ("working_directory", "workspace_context")
+            ):
+                current.invalidate(
+                    [tasklet["id"] for tasklet in current.store.tasklets(workspace_id)],
+                    workspace_id=workspace_id,
+                )
+            workspace = current.store.update_workspace(workspace_id, changes)
+            current.changed(workspace_id)
+            return workspace
+
+    @application.delete("/api/workspaces/{workspace_id}", status_code=204)
+    async def delete_workspace(workspace_id: str):
+        current = runtime()
+        async with current.lock:
+            current.require_workspace(workspace_id)
+            current.ensure_idle(workspace_id)
+            current.store.delete_workspace(workspace_id)
+            current.events.publish("workspaces", current.store.workspaces())
+            return Response(status_code=204)
+
+    @application.post(
+        "/api/workspaces/{workspace_id}/tasklets", response_model=Tasklet, status_code=201
+    )
+    async def create_tasklet(workspace_id: str, body: TaskletCreate):
+        current = runtime()
+        async with current.lock:
+            current.require_workspace(workspace_id)
+            current.ensure_idle(workspace_id)
             if body.working_directory:
                 current.directories.resolve(body.working_directory)
-            tasklet = current.store.create_tasklet(body.model_dump())
-            current.changed()
+            tasklet = current.store.create_tasklet(body.model_dump(), workspace_id=workspace_id)
+            current.changed(workspace_id)
             return tasklet
 
-    @application.patch("/api/tasklets/{tasklet_id}", response_model=Tasklet)
-    async def update_tasklet(tasklet_id: str, body: TaskletPatch):
+    @application.patch(
+        "/api/workspaces/{workspace_id}/tasklets/{tasklet_id}", response_model=Tasklet
+    )
+    async def update_tasklet(workspace_id: str, tasklet_id: str, body: TaskletPatch):
         current = runtime()
         async with current.lock:
-            previous = current.require_tasklet(tasklet_id)
+            previous = current.require_tasklet(tasklet_id, workspace_id)
             changes = body.model_dump(exclude_unset=True)
             if set(changes) - {"position"}:
-                current.ensure_idle()
+                current.ensure_idle(workspace_id)
             if changes.get("working_directory"):
                 changes["working_directory"] = str(
                     current.directories.resolve(changes["working_directory"])
@@ -137,67 +192,72 @@ def create_app(
                 key in changes and previous[key] != changes[key]
                 for key in ("prompt", "model", "working_directory")
             ):
-                current.invalidate([tasklet_id])
-            tasklet = current.store.update_tasklet(tasklet_id, changes)
-            current.changed()
+                current.invalidate([tasklet_id], workspace_id=workspace_id)
+            tasklet = current.store.update_tasklet(tasklet_id, changes, workspace_id=workspace_id)
+            current.changed(workspace_id)
             return tasklet
 
-    @application.delete("/api/tasklets/{tasklet_id}", status_code=204)
-    async def delete_tasklet(tasklet_id: str):
+    @application.delete("/api/workspaces/{workspace_id}/tasklets/{tasklet_id}", status_code=204)
+    async def delete_tasklet(workspace_id: str, tasklet_id: str):
         current = runtime()
         async with current.lock:
-            current.ensure_idle()
-            current.require_tasklet(tasklet_id)
-            current.invalidate([tasklet_id])
-            current.store.delete_tasklet(tasklet_id)
-            current.changed()
+            current.require_tasklet(tasklet_id, workspace_id)
+            current.ensure_idle(workspace_id)
+            current.invalidate([tasklet_id], workspace_id=workspace_id)
+            current.store.delete_tasklet(tasklet_id, workspace_id=workspace_id)
+            current.changed(workspace_id)
             return Response(status_code=204)
 
-    @application.post("/api/edges", response_model=Edge, status_code=201)
-    async def create_edge(body: EdgeCreate):
+    @application.post("/api/workspaces/{workspace_id}/edges", response_model=Edge, status_code=201)
+    async def create_edge(workspace_id: str, body: EdgeCreate):
         current = runtime()
         async with current.lock:
-            current.ensure_idle()
-            current.validate_edge(body.source, body.target)
-            edge = current.store.create_edge(body.model_dump())
-            current.invalidate([body.target])
-            current.changed()
+            current.ensure_idle(workspace_id)
+            current.validate_edge(body.source, body.target, workspace_id)
+            edge = current.store.create_edge(body.model_dump(), workspace_id=workspace_id)
+            current.invalidate([body.target], workspace_id=workspace_id)
+            current.changed(workspace_id)
             return edge
 
-    @application.patch("/api/edges/{edge_id}", response_model=Edge)
-    async def update_edge(edge_id: str, body: EdgePatch):
+    @application.patch("/api/workspaces/{workspace_id}/edges/{edge_id}", response_model=Edge)
+    async def update_edge(workspace_id: str, edge_id: str, body: EdgePatch):
         current = runtime()
         async with current.lock:
-            current.ensure_idle()
-            previous = current.require_edge(edge_id)
-            edge = current.store.update_edge(edge_id, body.pass_context)
+            previous = current.require_edge(edge_id, workspace_id)
+            current.ensure_idle(workspace_id)
+            edge = current.store.update_edge(edge_id, body.pass_context, workspace_id=workspace_id)
             if previous["pass_context"] != body.pass_context:
-                current.invalidate([edge["target"]])
-            current.changed()
+                current.invalidate([edge["target"]], workspace_id=workspace_id)
+            current.changed(workspace_id)
             return edge
 
-    @application.delete("/api/edges/{edge_id}", status_code=204)
-    async def delete_edge(edge_id: str):
+    @application.delete("/api/workspaces/{workspace_id}/edges/{edge_id}", status_code=204)
+    async def delete_edge(workspace_id: str, edge_id: str):
         current = runtime()
         async with current.lock:
-            current.ensure_idle()
-            edge = current.require_edge(edge_id)
-            current.invalidate([edge["target"]])
-            current.store.delete_edge(edge_id)
-            current.changed()
+            edge = current.require_edge(edge_id, workspace_id)
+            current.ensure_idle(workspace_id)
+            current.invalidate([edge["target"]], workspace_id=workspace_id)
+            current.store.delete_edge(edge_id, workspace_id=workspace_id)
+            current.changed(workspace_id)
             return Response(status_code=204)
 
-    @application.get("/api/tasklets/{tasklet_id}/messages", response_model=list[Message])
-    async def messages(tasklet_id: str):
+    @application.get(
+        "/api/workspaces/{workspace_id}/tasklets/{tasklet_id}/messages",
+        response_model=list[Message],
+    )
+    async def messages(workspace_id: str, tasklet_id: str):
         current = runtime()
-        current.require_tasklet(tasklet_id)
-        return current.store.messages(tasklet_id)
+        current.require_tasklet(tasklet_id, workspace_id)
+        return current.store.messages(tasklet_id, workspace_id=workspace_id)
 
     @application.post(
-        "/api/tasklets/{tasklet_id}/messages", response_model=Pipeline, status_code=202
+        "/api/workspaces/{workspace_id}/tasklets/{tasklet_id}/messages",
+        response_model=Pipeline,
+        status_code=202,
     )
-    async def send_message(tasklet_id: str, body: MessageCreate):
-        return await runtime().send_message(tasklet_id, body.content)
+    async def send_message(workspace_id: str, tasklet_id: str, body: MessageCreate):
+        return await runtime().send_message(tasklet_id, body.content, workspace_id)
 
     @application.get("/api/settings", response_model=Settings)
     async def settings():
@@ -209,23 +269,21 @@ def create_app(
         async with current.lock:
             current.ensure_idle()
             changes = body.model_dump(exclude_unset=True)
-            if changes.get("working_directory"):
-                changes["working_directory"] = str(
-                    current.directories.resolve(changes["working_directory"])
-                )
             previous = current.store.settings(private=True)
             if any(
                 key in changes and previous[key] != changes[key]
                 for key in (
                     "execution_mode",
-                    "working_directory",
                     "codex_sandbox",
                     "model",
-                    "workspace_context",
                 )
             ):
-                current.invalidate([tasklet["id"] for tasklet in current.store.tasklets()])
-                current.changed()
+                for workspace in current.store.workspaces():
+                    current.invalidate(
+                        [tasklet["id"] for tasklet in current.store.tasklets(workspace["id"])],
+                        workspace_id=workspace["id"],
+                    )
+                    current.changed(workspace["id"])
             settings = current.store.save_settings(changes)
             current.events.publish("settings", settings)
             return settings
@@ -277,13 +335,15 @@ def create_app(
             await current.codex.logout()
             return {"ok": True}
 
-    @application.post("/api/pipeline/start", response_model=Pipeline, status_code=202)
-    async def start_pipeline(body: PipelineStart | None = None):
-        return await runtime().start(body.tasklet_ids if body else None)
+    @application.post(
+        "/api/workspaces/{workspace_id}/pipeline/start", response_model=Pipeline, status_code=202
+    )
+    async def start_pipeline(workspace_id: str, body: PipelineStart | None = None):
+        return await runtime().start(body.tasklet_ids if body else None, workspace_id=workspace_id)
 
-    @application.post("/api/pipeline/stop", response_model=Pipeline)
-    async def stop_pipeline():
-        return await runtime().stop()
+    @application.post("/api/workspaces/{workspace_id}/pipeline/stop", response_model=Pipeline)
+    async def stop_pipeline(workspace_id: str):
+        return await runtime().stop(workspace_id)
 
     @application.get("/api/events")
     async def events(request: Request):
@@ -292,7 +352,7 @@ def create_app(
 
         async def stream():
             try:
-                yield f"event: workspace\ndata: {json.dumps(current.store.workspace(), ensure_ascii=False)}\n\n"
+                yield f"event: workspaces\ndata: {json.dumps(current.store.workspaces(), ensure_ascii=False)}\n\n"
                 while not await request.is_disconnected():
                     try:
                         event, data = await asyncio.wait_for(queue.get(), timeout=15)

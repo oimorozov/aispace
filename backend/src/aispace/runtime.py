@@ -37,33 +37,65 @@ class Runtime:
         self.events = Events()
         self.lock = asyncio.Lock()
         self.worker = None
+        self.worker_workspace_id = None
 
     @property
     def active(self):
-        return self.store.pipeline()["status"] in {"running", "stopping"}
+        workspace = (
+            self.store.workspace_info(self.worker_workspace_id)
+            if self.worker_workspace_id
+            else None
+        )
+        return workspace is not None and workspace["pipeline"]["status"] in {"running", "stopping"}
 
-    def ensure_idle(self):
-        if self.active:
-            raise HTTPException(409, "Сначала остановите текущий пайплайн")
+    @property
+    def active_workspace_id(self):
+        return self.worker_workspace_id if self.active else None
 
-    def require_tasklet(self, tasklet_id):
-        tasklet = self.store.tasklet(tasklet_id)
+    def require_workspace(self, workspace_id=None):
+        workspace_id = workspace_id or self.store.default_workspace_id
+        workspace = self.store.workspace_info(workspace_id) if workspace_id else None
+        if workspace is None:
+            raise HTTPException(404, "Пространство не найдено")
+        return workspace
+
+    def ensure_idle(self, workspace_id=None):
+        if workspace_id is not None:
+            self.require_workspace(workspace_id)
+        if self.active and (workspace_id is None or workspace_id == self.worker_workspace_id):
+            workspace = self.require_workspace(self.worker_workspace_id)
+            raise HTTPException(
+                409,
+                f"Сейчас выполняется пространство «{workspace['name']}». Сначала остановите его пайплайн.",
+            )
+
+    def require_tasklet(self, tasklet_id, workspace_id=None):
+        workspace_id = self.require_workspace(workspace_id)["id"]
+        tasklet = self.store.tasklet(tasklet_id, workspace_id=workspace_id)
         if tasklet is None:
             raise HTTPException(404, "Тасклет не найден")
         return tasklet
 
-    def require_edge(self, edge_id):
-        edge = next((edge for edge in self.store.edges() if edge["id"] == edge_id), None)
+    def require_edge(self, edge_id, workspace_id=None):
+        workspace_id = self.require_workspace(workspace_id)["id"]
+        edge = next(
+            (edge for edge in self.store.edges(workspace_id) if edge["id"] == edge_id), None
+        )
         if edge is None:
             raise HTTPException(404, "Связь не найдена")
         return edge
 
-    def changed(self):
-        self.events.publish("workspace", self.store.workspace())
+    def changed(self, workspace_id=None):
+        workspace_id = workspace_id or self.store.default_workspace_id
+        workspace = self.store.workspace(workspace_id) if workspace_id else None
+        if workspace:
+            self.events.publish("workspace", workspace)
+        self.events.publish("workspaces", self.store.workspaces())
 
-    def invalidate(self, roots, exclude=None):
+    def invalidate(self, roots, exclude=None, workspace_id=None):
+        workspace_id = self.require_workspace(workspace_id)["id"]
         children = {}
-        for edge in self.store.edges():
+        for edge in self.store.edges(workspace_id):
             children.setdefault(edge["source"], []).append(edge["target"])
         visited = set()
         pending = list(roots)
@@ -74,12 +106,15 @@ class Runtime:
             visited.add(tasklet_id)
             pending.extend(children.get(tasklet_id, []))
             if not exclude or tasklet_id not in exclude:
-                self.store.update_tasklet(tasklet_id, {"status": "idle", "error": None})
+                self.store.update_tasklet(
+                    tasklet_id, {"status": "idle", "error": None}, workspace_id=workspace_id
+                )
 
-    def validate_edge(self, source, target):
-        self.require_tasklet(source)
-        self.require_tasklet(target)
-        edges = self.store.edges()
+    def validate_edge(self, source, target, workspace_id=None):
+        workspace_id = self.require_workspace(workspace_id)["id"]
+        self.require_tasklet(source, workspace_id)
+        self.require_tasklet(target, workspace_id)
+        edges = self.store.edges(workspace_id)
         if any(edge["source"] == source and edge["target"] == target for edge in edges):
             raise HTTPException(409, "Такая связь уже существует")
         visited = set()
@@ -122,45 +157,67 @@ class Runtime:
             if len(value) > 4000:
                 raise HTTPException(422, "Цель должна содержать не более 4000 символов")
 
-    async def send_message(self, tasklet_id, content):
+    async def send_message(self, tasklet_id, content, workspace_id=None):
         content = self.normalize_command(content)
-        tasklet = self.require_tasklet(tasklet_id)
-        settings = self.store.settings(private=True)
-        self.validate_command(content, settings["execution_mode"])
-        if content == "/stop" or (content == "/goal pause" and self.active):
-            result = await self.stop()
-            self.record_command(
-                tasklet_id, content, "Пайплайн остановлен. Активные цели приостановлены."
-            )
-            return result
-        if content in {"/goal", "/goal status", "/goal inspect", "/goal pause", "/goal clear"}:
-            async with self.lock:
+        async with self.lock:
+            workspace_id = self.require_workspace(workspace_id)["id"]
+            tasklet = self.require_tasklet(tasklet_id, workspace_id)
+            settings = self.store.settings(private=True, workspace_id=workspace_id)
+            self.validate_command(content, settings["execution_mode"])
+            own_active = self.active_workspace_id == workspace_id
+            stop_requested = content == "/stop" or (content == "/goal pause" and own_active)
+            if not stop_requested and content in {
+                "/goal",
+                "/goal status",
+                "/goal inspect",
+                "/goal pause",
+                "/goal clear",
+            }:
                 self.ensure_idle()
                 try:
                     result = await self.codex.command(tasklet, settings, content)
                 except ProviderError as error:
                     raise HTTPException(422, str(error)) from error
-                self.record_command(tasklet_id, content, result)
-                return self.store.pipeline()
-        return await self.start([tasklet_id], (tasklet_id, content))
+                self.record_command(tasklet_id, content, result, workspace_id)
+                return self.store.pipeline(workspace_id)
+        if stop_requested:
+            result = await self.stop(workspace_id)
+            async with self.lock:
+                if self.store.workspace_info(workspace_id) and self.store.tasklet(
+                    tasklet_id, workspace_id=workspace_id
+                ):
+                    self.record_command(
+                        tasklet_id,
+                        content,
+                        "Пайплайн остановлен. Активные цели приостановлены."
+                        if own_active
+                        else "В этом пространстве нет активного пайплайна.",
+                        workspace_id,
+                    )
+            return result
+        return await self.start([tasklet_id], (tasklet_id, content), workspace_id)
 
-    def record_command(self, tasklet_id, content, result):
+    def record_command(self, tasklet_id, content, result, workspace_id=None):
+        workspace_id = self.require_workspace(workspace_id)["id"]
         for role, value in (("user", content), ("assistant", result)):
-            message = self.store.create_message(tasklet_id, role, value, None)
+            message = self.store.create_message(
+                tasklet_id, role, value, None, workspace_id=workspace_id
+            )
             self.events.publish("message", message)
 
-    async def start(self, selected=None, followup=None):
+    async def start(self, selected=None, followup=None, workspace_id=None):
         async with self.lock:
+            workspace_id = self.require_workspace(workspace_id)["id"]
             self.ensure_idle()
-            all_tasks = {tasklet["id"]: tasklet for tasklet in self.store.tasklets()}
+            all_tasks = {tasklet["id"]: tasklet for tasklet in self.store.tasklets(workspace_id)}
             if selected is None:
                 selected = list(all_tasks)
             if not selected:
                 raise HTTPException(422, "Создайте хотя бы один тасклет для запуска")
             for tasklet_id in selected:
-                self.require_tasklet(tasklet_id)
+                self.require_tasklet(tasklet_id, workspace_id)
             chosen = set(selected)
-            edges = self.store.edges()
+            edges = self.store.edges(workspace_id)
             parents = {tasklet_id: set() for tasklet_id in all_tasks}
             for edge in edges:
                 parents[edge["target"]].add(edge["source"])
@@ -171,7 +228,7 @@ class Runtime:
                     if parent not in chosen and all_tasks[parent]["status"] != "completed":
                         chosen.add(parent)
                         pending.append(parent)
-            settings = self.store.settings(private=True)
+            settings = self.store.settings(private=True, workspace_id=workspace_id)
             codex_mode = settings["execution_mode"] == "codex"
             if codex_mode:
                 status = await self.codex.status()
@@ -211,24 +268,31 @@ class Runtime:
             pipeline = Pipeline(
                 id=new_id(), status="running", started_at=now(), total=len(chosen)
             ).model_dump()
-            self.invalidate(chosen, exclude=chosen)
-            self.store.save_pipeline(pipeline)
+            self.invalidate(chosen, exclude=chosen, workspace_id=workspace_id)
+            self.store.save_pipeline(pipeline, workspace_id=workspace_id)
             for tasklet_id in chosen:
-                self.store.update_tasklet(tasklet_id, {"status": "queued", "error": None})
-            self.changed()
+                self.store.update_tasklet(
+                    tasklet_id, {"status": "queued", "error": None}, workspace_id=workspace_id
+                )
+            self.worker_workspace_id = workspace_id
+            self.changed(workspace_id)
             self.worker = asyncio.create_task(
-                self.run(pipeline, chosen, parents, settings, followup)
+                self.run(pipeline, chosen, parents, settings, followup, workspace_id)
             )
             return pipeline
 
-    async def execute(self, tasklet_id, pipeline_id, settings, followup):
+    async def execute(self, tasklet_id, pipeline_id, settings, followup, workspace_id):
         tasklet = self.store.update_tasklet(
-            tasklet_id, {"status": "running", "error": None, "last_output": ""}
+            tasklet_id,
+            {"status": "running", "error": None, "last_output": ""},
+            workspace_id=workspace_id,
         )
-        self.changed()
-        history = self.store.messages(tasklet_id)
+        self.changed(workspace_id)
+        history = self.store.messages(tasklet_id, workspace_id=workspace_id)
         content = followup[1] if followup and followup[0] == tasklet_id else tasklet["prompt"]
-        user = self.store.create_message(tasklet_id, "user", content, pipeline_id)
+        user = self.store.create_message(
+            tasklet_id, "user", content, pipeline_id, workspace_id=workspace_id
+        )
         self.events.publish("message", user)
         messages = []
         context = settings["workspace_context"].strip()
@@ -236,9 +300,9 @@ class Runtime:
             messages.append({"role": "system", "content": context})
         if followup and followup[0] == tasklet_id and not history and tasklet["prompt"]:
             messages.append({"role": "system", "content": tasklet["prompt"]})
-        for edge in self.store.edges():
+        for edge in self.store.edges(workspace_id):
             if edge["target"] == tasklet_id and edge["pass_context"]:
-                predecessor = self.store.tasklet(edge["source"])
+                predecessor = self.store.tasklet(edge["source"], workspace_id=workspace_id)
                 if predecessor["last_output"]:
                     messages.append(
                         {
@@ -265,30 +329,42 @@ class Runtime:
                 output += chunk
                 if assistant is None:
                     assistant = self.store.create_message(
-                        tasklet_id, "assistant", output, pipeline_id
+                        tasklet_id, "assistant", output, pipeline_id, workspace_id=workspace_id
                     )
                 else:
-                    assistant = self.store.update_message(assistant, output)
-                self.store.update_tasklet(tasklet_id, {"last_output": output})
+                    assistant = self.store.update_message(
+                        assistant, output, workspace_id=workspace_id
+                    )
+                self.store.update_tasklet(
+                    tasklet_id, {"last_output": output}, workspace_id=workspace_id
+                )
                 self.events.publish("message", assistant)
             if not output.strip():
                 raise ProviderError("Модель завершила запрос без текстового ответа")
-            self.store.update_tasklet(tasklet_id, {"status": "completed", "error": None})
+            self.store.update_tasklet(
+                tasklet_id, {"status": "completed", "error": None}, workspace_id=workspace_id
+            )
         except asyncio.CancelledError:
             self.store.update_tasklet(
-                tasklet_id, {"status": "cancelled", "error": "Остановлено пользователем"}
+                tasklet_id,
+                {"status": "cancelled", "error": "Остановлено пользователем"},
+                workspace_id=workspace_id,
             )
             raise
         except ProviderError as error:
-            self.store.update_tasklet(tasklet_id, {"status": "failed", "error": str(error)})
+            self.store.update_tasklet(
+                tasklet_id, {"status": "failed", "error": str(error)}, workspace_id=workspace_id
+            )
         except Exception:
             self.store.update_tasklet(
-                tasklet_id, {"status": "failed", "error": "Не удалось выполнить задачу"}
+                tasklet_id,
+                {"status": "failed", "error": "Не удалось выполнить задачу"},
+                workspace_id=workspace_id,
             )
         finally:
-            self.changed()
+            self.changed(workspace_id)
 
-    async def run(self, pipeline, chosen, parents, settings, followup):
+    async def run(self, pipeline, chosen, parents, settings, followup, workspace_id):
         pending = set(chosen)
         running = {}
         stopped = False
@@ -297,24 +373,29 @@ class Runtime:
             while pending or running:
                 for tasklet_id in sorted(pending):
                     statuses = [
-                        self.store.tasklet(parent)["status"] for parent in parents[tasklet_id]
+                        self.store.tasklet(parent, workspace_id=workspace_id)["status"]
+                        for parent in parents[tasklet_id]
                     ]
                     if any(status in {"failed", "blocked", "cancelled"} for status in statuses):
                         self.store.update_tasklet(
                             tasklet_id,
                             {"status": "blocked", "error": "Зависимость не выполнена успешно"},
+                            workspace_id=workspace_id,
                         )
                         pending.remove(tasklet_id)
-                        self.changed()
+                        self.changed(workspace_id)
                 for tasklet_id in sorted(pending):
                     if len(running) >= settings["max_parallel"]:
                         break
                     if all(
-                        self.store.tasklet(parent)["status"] == "completed"
+                        self.store.tasklet(parent, workspace_id=workspace_id)["status"]
+                        == "completed"
                         for parent in parents[tasklet_id]
                     ):
                         task = asyncio.create_task(
-                            self.execute(tasklet_id, pipeline["id"], settings, followup)
+                            self.execute(
+                                tasklet_id, pipeline["id"], settings, followup, workspace_id
+                            )
                         )
                         running[task] = tasklet_id
                         pending.remove(tasklet_id)
@@ -324,16 +405,18 @@ class Runtime:
                         del running[task]
                         task.result()
                     pipeline["completed"] = sum(
-                        self.store.tasklet(tasklet_id)["status"] == "completed"
+                        self.store.tasklet(tasklet_id, workspace_id=workspace_id)["status"]
+                        == "completed"
                         for tasklet_id in chosen
                     )
-                    self.store.save_pipeline(pipeline)
-                    self.changed()
+                    self.store.save_pipeline(pipeline, workspace_id=workspace_id)
+                    self.changed(workspace_id)
                 elif pending:
                     for tasklet_id in pending:
                         self.store.update_tasklet(
                             tasklet_id,
                             {"status": "blocked", "error": "Не удалось разрешить зависимости"},
+                            workspace_id=workspace_id,
                         )
                     pending.clear()
         except asyncio.CancelledError:
@@ -346,7 +429,10 @@ class Runtime:
             if running:
                 await asyncio.gather(*running, return_exceptions=True)
             for tasklet_id in chosen:
-                if self.store.tasklet(tasklet_id)["status"] in {"queued", "running"}:
+                if self.store.tasklet(tasklet_id, workspace_id=workspace_id)["status"] in {
+                    "queued",
+                    "running",
+                }:
                     self.store.update_tasklet(
                         tasklet_id,
                         {
@@ -355,8 +441,12 @@ class Runtime:
                             if stopped
                             else "Выполнение прервано",
                         },
+                        workspace_id=workspace_id,
                     )
-            statuses = [self.store.tasklet(tasklet_id)["status"] for tasklet_id in chosen]
+            statuses = [
+                self.store.tasklet(tasklet_id, workspace_id=workspace_id)["status"]
+                for tasklet_id in chosen
+            ]
             status = (
                 "cancelled"
                 if stopped
@@ -371,32 +461,45 @@ class Runtime:
                 error=failure
                 or ("Не все тасклеты выполнены успешно" if status == "failed" else None),
             )
-            self.store.save_pipeline(pipeline)
-            self.changed()
+            self.store.save_pipeline(pipeline, workspace_id=workspace_id)
+            self.changed(workspace_id)
+        return pipeline
 
-    async def stop(self):
+    async def stop(self, workspace_id=None):
+        workspace_id = workspace_id or self.active_workspace_id or self.store.default_workspace_id
+        if workspace_id is None:
+            return Pipeline().model_dump()
         async with self.lock:
+            self.require_workspace(workspace_id)
             worker = self.worker
-            if not self.active or worker is None:
-                return self.store.pipeline()
-            pipeline = self.store.pipeline()
+            if not self.active or self.worker_workspace_id != workspace_id:
+                return self.store.pipeline(workspace_id)
+            pipeline = self.store.pipeline(workspace_id)
             already_stopping = pipeline["status"] == "stopping"
             pipeline["status"] = "stopping"
-            self.store.save_pipeline(pipeline)
-            self.changed()
+            self.store.save_pipeline(pipeline, workspace_id=workspace_id)
+            self.changed(workspace_id)
             if not already_stopping:
                 worker.cancel()
+        completed = None
         with suppress(asyncio.CancelledError):
-            await worker
+            completed = await worker
         async with self.lock:
-            if self.store.pipeline()["status"] == "stopping":
+            result = completed or {**pipeline, "status": "cancelled", "finished_at": now()}
+            if self.store.workspace_info(workspace_id) is None:
+                return result
+            current = self.store.pipeline(workspace_id)
+            if current["id"] != pipeline["id"]:
+                return result
+            if current["status"] == "stopping":
                 pipeline.update(status="cancelled", finished_at=now())
-                self.store.save_pipeline(pipeline)
-                for tasklet in self.store.tasklets():
+                self.store.save_pipeline(pipeline, workspace_id=workspace_id)
+                for tasklet in self.store.tasklets(workspace_id):
                     if tasklet["status"] in {"queued", "running"}:
                         self.store.update_tasklet(
                             tasklet["id"],
                             {"status": "cancelled", "error": "Остановлено пользователем"},
+                            workspace_id=workspace_id,
                         )
-                self.changed()
-            return self.store.pipeline()
+                self.changed(workspace_id)
+            return self.store.pipeline(workspace_id)

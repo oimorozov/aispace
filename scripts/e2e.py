@@ -69,7 +69,7 @@ def main():
                     "--port",
                     "8000",
                 ],
-                "http://127.0.0.1:8000/api/workspace",
+                "http://127.0.0.1:8000/api/workspaces",
             ),
             (
                 ["npm", "--prefix", "frontend", "run", "dev", "--", "--strictPort"],

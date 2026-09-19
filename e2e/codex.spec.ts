@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test'
 
 const backend = `${(process.env.AISPACE_E2E_API_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')}/api`
+let workspaceBase: string
 const auditServer = 'http://127.0.0.1:8766'
 
 type Tasklet = { id: string; title: string; status: string; working_directory: string | null }
@@ -8,7 +9,7 @@ type Workspace = { tasklets: Tasklet[]; pipeline: { status: string } }
 type CodexEvent = { transport: string; kind: string; time: number; process_id: string; label?: string; input?: string; thread_id?: string; active_turns?: number; parameters?: { cwd?: string; sandbox?: string }; goal?: { objective: string; status: string } }
 
 async function workspace(request: APIRequestContext): Promise<Workspace> {
-  const response = await request.get(`${backend}/workspace`)
+  const response = await request.get(`${workspaceBase}`)
   expect(response.ok()).toBeTruthy()
   return response.json()
 }
@@ -20,7 +21,7 @@ async function events(request: APIRequestContext): Promise<CodexEvent[]> {
 }
 
 async function createTasklet(request: APIRequestContext, title: string, label: string, delay = 0.1, y = 100): Promise<Tasklet> {
-  const response = await request.post(`${backend}/tasklets`, { data: { title, prompt: `Выполни задачу [[label:${label}]][[delay:${delay}]]`, position: { x: 80, y } } })
+  const response = await request.post(`${workspaceBase}/tasklets`, { data: { title, prompt: `Выполни задачу [[label:${label}]][[delay:${delay}]]`, position: { x: 80, y } } })
   expect(response.ok()).toBeTruthy()
   return response.json()
 }
@@ -42,17 +43,26 @@ async function selectFolder(page: Page, field: string, folders: string[]) {
 }
 
 test.beforeEach(async ({ page, request }) => {
+  const existing = await (await request.get(`${backend}/workspaces`)).json()
+  for (const item of existing) {
+    expect((await request.post(`${backend}/workspaces/${item.id}/pipeline/stop`)).ok()).toBeTruthy()
+    expect((await request.delete(`${backend}/workspaces/${item.id}`)).ok()).toBeTruthy()
+  }
+  const created = await request.post(`${backend}/workspaces`, { data: { name: 'Тестовое пространство' } })
+  expect(created.ok()).toBeTruthy()
+  workspaceBase = `${backend}/workspaces/${(await created.json()).id}`
   await page.route('**/api/directories/capabilities', route => route.fulfill({ json: { native_picker: false, platform: 'linux' } }))
   await page.route('**/api/directories/choose', route => route.fulfill({ status: 501, json: { detail: 'Системный выбор папки не включён в этом сценарии' } }))
-  await request.post(`${backend}/pipeline/stop`)
+  await request.post(`${workspaceBase}/pipeline/stop`)
   await expect.poll(async () => (await workspace(request)).pipeline.status).not.toMatch(/^(running|stopping)$/)
   for (const tasklet of (await workspace(request)).tasklets) {
-    expect((await request.delete(`${backend}/tasklets/${tasklet.id}`)).ok()).toBeTruthy()
+    expect((await request.delete(`${workspaceBase}/tasklets/${tasklet.id}`)).ok()).toBeTruthy()
   }
   const listing = await request.get(`${backend}/directories`)
   expect(listing.ok()).toBeTruthy()
   const root = (await listing.json()).path
-  expect((await request.patch(`${backend}/settings`, { data: { execution_mode: 'codex', api_key: null, model: '', working_directory: root, codex_sandbox: 'read-only', max_parallel: 2, workspace_context: '' } })).ok()).toBeTruthy()
+  expect((await request.patch(`${backend}/settings`, { data: { execution_mode: 'codex', api_key: null, model: '', codex_sandbox: 'read-only', max_parallel: 2 } })).ok()).toBeTruthy()
+  expect((await request.patch(workspaceBase, { data: { working_directory: root } })).ok()).toBeTruthy()
   await request.post(`${auditServer}/reset`)
 })
 
@@ -91,8 +101,8 @@ test('working directories selected in settings and tasklets persist and reach th
   await page.goto('/')
   await page.getByRole('button', { name: 'Настройки', exact: true }).click()
   const project = await selectFolder(page, 'Рабочая папка проекта', ['demo'])
-  await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).click()
-  await expect.poll(async () => (await (await request.get(`${backend}/settings`)).json()).working_directory).toBe(project)
+  await page.getByRole('button', { name: 'Сохранить пространство', exact: true }).click()
+  await expect.poll(async () => (await (await request.get(workspaceBase)).json()).working_directory).toBe(project)
   await page.reload()
   await page.getByRole('button', { name: 'Настройки', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true })).toContainText(project)
@@ -118,7 +128,7 @@ test('directory picker leaves a saved nested directory through the root and sele
   const base = root.replace(/\/$/, '')
   const nested = `${base}/demo/component`
   const other = `${base}/other`
-  expect((await request.patch(`${backend}/settings`, { data: { working_directory: nested } })).ok()).toBeTruthy()
+  expect((await request.patch(workspaceBase, { data: { working_directory: nested } })).ok()).toBeTruthy()
   await page.goto('/')
   await page.getByRole('button', { name: 'Настройки', exact: true }).click()
   await page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true }).click()
@@ -132,15 +142,15 @@ test('directory picker leaves a saved nested directory through the root and sele
   await expect(path).toHaveValue(other)
   await dialog.getByRole('button', { name: 'Выбрать папку', exact: true }).click()
   await expect(dialog).not.toBeVisible()
-  await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).click()
-  await expect.poll(async () => (await (await request.get(`${backend}/settings`)).json()).working_directory).toBe(other)
+  await page.getByRole('button', { name: 'Сохранить пространство', exact: true }).click()
+  await expect.poll(async () => (await (await request.get(workspaceBase)).json()).working_directory).toBe(other)
   await page.reload()
   await page.getByRole('button', { name: 'Настройки', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true })).toContainText(other)
 })
 
 test('native directory picker opens only on click and saves the selected host path', async ({ page, request }, testInfo) => {
-  const settings = await (await request.get(`${backend}/settings`)).json()
+  const settings = await (await request.get(workspaceBase)).json()
   const selected = `${settings.working_directory.replace(/\/$/, '')}/other`
   const calls: { method: string; path: string | null }[] = []
   let finish: () => void = () => {}
@@ -166,12 +176,12 @@ test('native directory picker opens only on click and saves the selected host pa
   finish()
   await expect(dialog).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true })).toContainText(selected)
-  await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).click()
-  await expect.poll(async () => (await (await request.get(`${backend}/settings`)).json()).working_directory).toBe(selected)
+  await page.getByRole('button', { name: 'Сохранить пространство', exact: true }).click()
+  await expect.poll(async () => (await (await request.get(workspaceBase)).json()).working_directory).toBe(selected)
 })
 
 test('cancelling the native directory picker preserves the current directory', async ({ page, request }) => {
-  const settings = await (await request.get(`${backend}/settings`)).json()
+  const settings = await (await request.get(workspaceBase)).json()
   await page.route('**/api/directories/capabilities', route => route.fulfill({ json: { native_picker: true, platform: 'darwin' } }))
   await page.route('**/api/directories/choose', route => route.fulfill({ json: { path: null } }))
   await page.goto('/')
@@ -184,12 +194,12 @@ test('cancelling the native directory picker preserves the current directory', a
   await expect(dialog.getByRole('button', { name: 'Выбрать папку', exact: true })).toBeEnabled()
   await dialog.getByRole('button', { name: 'Закрыть выбор папки', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Выбрать: Рабочая папка проекта', exact: true })).toContainText(settings.working_directory)
-  await expect(page.getByRole('button', { name: 'Сохранить настройки', exact: true })).toBeDisabled()
-  expect((await (await request.get(`${backend}/settings`)).json()).working_directory).toBe(settings.working_directory)
+  await expect(page.getByRole('button', { name: 'Сохранить пространство', exact: true })).toBeDisabled()
+  expect((await (await request.get(workspaceBase)).json()).working_directory).toBe(settings.working_directory)
 })
 
 test('native directory picker errors keep the browser directory fallback usable', async ({ page, request }) => {
-  const settings = await (await request.get(`${backend}/settings`)).json()
+  const settings = await (await request.get(workspaceBase)).json()
   const selected = `${settings.working_directory.replace(/\/$/, '')}/demo`
   await page.route('**/api/directories/capabilities', route => route.fulfill({ json: { native_picker: true, platform: 'darwin' } }))
   await page.route('**/api/directories/choose', route => route.fulfill({ status: 503, json: { detail: 'Не удалось открыть Finder. Выберите папку в списке.' } }))
@@ -202,17 +212,17 @@ test('native directory picker errors keep the browser directory fallback usable'
   await dialog.getByRole('button', { name: 'demo', exact: true }).click()
   await expect(dialog.getByRole('textbox', { name: 'Путь к папке', exact: true })).toHaveValue(selected)
   await dialog.getByRole('button', { name: 'Выбрать папку', exact: true }).click()
-  await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).click()
-  await expect.poll(async () => (await (await request.get(`${backend}/settings`)).json()).working_directory).toBe(selected)
+  await page.getByRole('button', { name: 'Сохранить пространство', exact: true }).click()
+  await expect.poll(async () => (await (await request.get(workspaceBase)).json()).working_directory).toBe(selected)
 })
 
 test('stopping from a Codex chat interrupts both active turns and cancels queued dependencies', async ({ page, request }, testInfo) => {
   const first = await createTasklet(request, 'Долгий Codex A', 'codex-slow-a', 20, 60)
-  expect((await request.patch(`${backend}/tasklets/${first.id}`, { data: { prompt: '/goal Выполни долгую задачу [[label:codex-slow-a]][[delay:20]]' } })).ok()).toBeTruthy()
+  expect((await request.patch(`${workspaceBase}/tasklets/${first.id}`, { data: { prompt: '/goal Выполни долгую задачу [[label:codex-slow-a]][[delay:20]]' } })).ok()).toBeTruthy()
   const second = await createTasklet(request, 'Долгий Codex B', 'codex-slow-b', 20, 280)
   const dependent = await createTasklet(request, 'Зависимый Codex', 'codex-never', 0.1, 500)
   for (const parent of [first, second]) {
-    expect((await request.post(`${backend}/edges`, { data: { source: parent.id, target: dependent.id } })).ok()).toBeTruthy()
+    expect((await request.post(`${workspaceBase}/edges`, { data: { source: parent.id, target: dependent.id } })).ok()).toBeTruthy()
   }
   await page.goto('/')
   await page.locator(`.react-flow__node[data-id="${first.id}"]`).click()
@@ -246,13 +256,13 @@ test('unsupported harness commands are rejected before a model turn starts', asy
   await page.locator(`.react-flow__node[data-id="${tasklet.id}"]`).click()
   await page.getByRole('tab', { name: /^Чат/ }).click()
   await page.getByPlaceholder('Напишите сообщение…', { exact: true }).fill('/unknown execute this')
-  const responsePromise = page.waitForResponse(response => response.url().endsWith(`/api/tasklets/${tasklet.id}/messages`) && response.request().method() === 'POST')
+  const responsePromise = page.waitForResponse(response => response.url().endsWith(`/tasklets/${tasklet.id}/messages`) && response.request().method() === 'POST')
   await page.getByRole('button', { name: 'Отправить сообщение', exact: true }).click()
   const response = await responsePromise
   expect(response.status()).toBe(422)
   await expect(page.getByText(/Команда \/unknown пока не поддерживается/)).toBeVisible()
   expect((await events(request)).filter(event => event.kind === 'start')).toHaveLength(0)
-  const messages = await (await request.get(`${backend}/tasklets/${tasklet.id}/messages`)).json()
+  const messages = await (await request.get(`${workspaceBase}/tasklets/${tasklet.id}/messages`)).json()
   expect(messages).toEqual([])
 })
 
@@ -273,7 +283,7 @@ test('goal commands use the harness goal protocol instead of sending a literal s
   await expect(page.getByRole('log', { name: 'История чата', exact: true })).toContainText('Готово:')
   const inspected = recorded.filter(event => event.kind === 'goal_get').length
   await page.getByPlaceholder('Напишите сообщение…', { exact: true }).fill('/goal inspect')
-  const inspectResponse = page.waitForResponse(response => response.url().endsWith(`/api/tasklets/${tasklet.id}/messages`) && response.request().method() === 'POST')
+  const inspectResponse = page.waitForResponse(response => response.url().endsWith(`/tasklets/${tasklet.id}/messages`) && response.request().method() === 'POST')
   await page.getByRole('button', { name: 'Отправить сообщение', exact: true }).click()
   expect((await inspectResponse).ok()).toBeTruthy()
   await expect.poll(async () => (await events(request)).filter(event => event.kind === 'goal_get').length).toBeGreaterThan(inspected)

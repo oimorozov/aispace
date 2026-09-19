@@ -45,6 +45,8 @@ async def context(tmp_path, codex=None):
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         ) as client,
     ):
+        client.workspace_id = (await client.get("/api/workspaces")).json()[0]["id"]
+        client.workspace_path = f"/api/workspaces/{client.workspace_id}"
         yield client, app.state.runtime, project
 
 
@@ -61,11 +63,12 @@ async def test_directory_picker_and_validation_cannot_escape_root(tmp_path):
                 await client.get("/api/directories", params={"path": str(path)})
             ).status_code == 422
             assert (
-                await client.patch("/api/settings", json={"working_directory": str(path)})
+                await client.patch(client.workspace_path, json={"working_directory": str(path)})
             ).status_code == 422
         assert (
             await client.post(
-                "/api/tasklets", json={"title": "test", "working_directory": str(tmp_path)}
+                f"{client.workspace_path}/tasklets",
+                json={"title": "test", "working_directory": str(tmp_path)},
             )
         ).status_code == 422
 
@@ -85,17 +88,22 @@ async def test_default_directory_picker_can_select_folders_outside_project(tmp_p
             transport=httpx.ASGITransport(app=app), base_url="http://testserver"
         ) as client,
     ):
+        client.workspace_id = (await client.get("/api/workspaces")).json()[0]["id"]
+        client.workspace_path = f"/api/workspaces/{client.workspace_id}"
         root = (await client.get("/api/directories")).json()
         assert root["path"] == str(Path("/").resolve())
         assert root["parent"] is None
         listing = (await client.get("/api/directories", params={"path": str(outside)})).json()
         assert listing["parent"] == str(tmp_path.resolve())
         assert listing["entries"] == [{"name": hidden.name, "path": str(hidden.resolve())}]
-        settings = await client.patch("/api/settings", json={"working_directory": str(outside)})
+        settings = await client.patch(
+            client.workspace_path, json={"working_directory": str(outside)}
+        )
         assert settings.status_code == 200
         assert settings.json()["working_directory"] == str(outside.resolve())
         tasklet = await client.post(
-            "/api/tasklets", json={"title": "External project", "working_directory": str(hidden)}
+            f"{client.workspace_path}/tasklets",
+            json={"title": "External project", "working_directory": str(hidden)},
         )
         assert tasklet.status_code == 201
         assert tasklet.json()["working_directory"] == str(hidden)
@@ -133,19 +141,18 @@ async def test_codex_runs_without_api_key_and_preserves_workspace_overrides(tmp_
     async with context(tmp_path, codex) as (client, runtime, project):
         nested = project / "source"
         nested.mkdir()
-        response = await client.patch(
-            "/api/settings", json={"execution_mode": "codex", "working_directory": str(project)}
-        )
+        await client.patch(client.workspace_path, json={"working_directory": str(project)})
+        response = await client.patch("/api/settings", json={"execution_mode": "codex"})
         assert response.status_code == 200
         assert response.json()["api_key_configured"] is False
         assert response.json()["model"] == ""
         tasklet = (
             await client.post(
-                "/api/tasklets",
+                f"{client.workspace_path}/tasklets",
                 json={"title": "test", "prompt": "Read files", "working_directory": str(nested)},
             )
         ).json()
-        assert (await client.post("/api/pipeline/start")).status_code == 202
+        assert (await client.post(f"{client.workspace_path}/pipeline/start")).status_code == 202
         await asyncio.wait_for(runtime.worker, 2)
         assert runtime.store.tasklet(tasklet["id"])["status"] == "completed"
         assert codex.calls[0][3]["working_directory"] == str(nested)
@@ -155,7 +162,9 @@ async def test_codex_runs_without_api_key_and_preserves_workspace_overrides(tmp_
         assert (await client.get("/api/settings")).json()["execution_mode"] == "codex"
         assert runtime.store.tasklet(tasklet["id"])["working_directory"] == str(nested)
         assert runtime.store.codex_session(tasklet["id"])["thread_id"] == "test-thread"
-        await client.patch(f"/api/tasklets/{tasklet['id']}", json={"working_directory": None})
+        await client.patch(
+            f"{client.workspace_path}/tasklets/{tasklet['id']}", json={"working_directory": None}
+        )
         assert runtime.store.tasklet(tasklet["id"])["working_directory"] is None
 
 
@@ -163,11 +172,13 @@ async def test_codex_checks_auth_and_directory_before_start(tmp_path):
     codex = StubCodex()
     async with context(tmp_path, codex) as (client, runtime, project):
         await client.patch("/api/settings", json={"execution_mode": "codex"})
-        await client.post("/api/tasklets", json={"title": "test", "prompt": "Read files"})
-        assert (await client.post("/api/pipeline/start")).status_code == 422
-        await client.patch("/api/settings", json={"working_directory": str(project)})
+        await client.post(
+            f"{client.workspace_path}/tasklets", json={"title": "test", "prompt": "Read files"}
+        )
+        assert (await client.post(f"{client.workspace_path}/pipeline/start")).status_code == 422
+        await client.patch(client.workspace_path, json={"working_directory": str(project)})
         codex.authenticated = False
-        response = await client.post("/api/pipeline/start")
+        response = await client.post(f"{client.workspace_path}/pipeline/start")
         assert response.status_code == 422
         assert "Войдите" in response.json()["detail"]
         assert runtime.store.pipeline()["status"] == "idle"
@@ -177,13 +188,14 @@ async def test_codex_checks_auth_and_directory_before_start(tmp_path):
 async def test_harness_commands_are_not_silently_forwarded_to_api(tmp_path):
     async with context(tmp_path) as (client, runtime, project):
         tasklet = (
-            await client.post("/api/tasklets", json={"title": "test", "prompt": "Read files"})
+            await client.post(
+                f"{client.workspace_path}/tasklets", json={"title": "test", "prompt": "Read files"}
+            )
         ).json()
-        path = f"/api/tasklets/{tasklet['id']}/messages"
+        path = f"{client.workspace_path}/tasklets/{tasklet['id']}/messages"
         assert (await client.post(path, json={"content": "/goal Write code"})).status_code == 422
-        await client.patch(
-            "/api/settings", json={"execution_mode": "codex", "working_directory": str(project)}
-        )
+        await client.patch(client.workspace_path, json={"working_directory": str(project)})
+        await client.patch("/api/settings", json={"execution_mode": "codex"})
         assert (await client.post(path, json={"content": "/plan Write code"})).status_code == 422
         response = await client.post(path, json={"content": "/goal"})
         assert response.status_code == 202
@@ -204,7 +216,7 @@ def test_existing_settings_are_migrated_without_overwriting_data(tmp_path):
     store = Store(tmp_path)
     try:
         assert store.settings()["execution_mode"] == "api"
-        assert store.settings()["working_directory"] is None
+        assert store.settings(workspace_id=store.default_workspace_id)["working_directory"] is None
         assert store.settings(private=True)["api_key"] == "kept-key"
         assert store.settings()["model"] == "kept-model"
     finally:
