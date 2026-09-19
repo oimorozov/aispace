@@ -108,6 +108,7 @@ class Tasklet(BaseModel):
     updated_at: str
     error: str | None
     last_output: str
+    source: dict | None = None
 
 
 class Edge(BaseModel):
@@ -115,6 +116,8 @@ class Edge(BaseModel):
     source: str
     target: str
     pass_context: bool
+    origin: Literal["github", "description", "ai", "user"] | None = None
+    explanation: str | None = None
 
 
 class Message(BaseModel):
@@ -177,6 +180,7 @@ class Workspace(WorkspaceSummary):
     working_directory: str | None
     tasklets: list[Tasklet]
     edges: list[Edge]
+    import_metadata: dict | None = None
 
 
 class DirectoryChoose(BaseModel):

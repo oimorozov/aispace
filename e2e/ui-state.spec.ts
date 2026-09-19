@@ -167,6 +167,7 @@ test('refresh reconnects to a running pipeline without repeating or stopping it'
   await page.goto('/')
   await select(page, item.id)
   await page.getByRole('button', { name: 'Запустить тасклет', exact: true }).click()
+  await expect(page.getByRole('tab', { name: /^Чат/ })).toHaveAttribute('aria-selected', 'true')
   await expect.poll(async () => (await (await request.get(`${provider}/audit`)).json()).events.filter((event: { kind: string }) => event.kind === 'start').length).toBe(1)
   const mutations = writes(page)
   await page.reload()

@@ -3,6 +3,7 @@ import { defineConfig } from '@playwright/test'
 export default defineConfig({
   testDir: '.',
   testMatch: '*.spec.ts',
+  testIgnore: process.env.AISPACE_GITHUB_MOCK_URL ? [] : ['github*.spec.ts'],
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,
@@ -15,5 +16,5 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  outputDir: '../test-results',
+  outputDir: process.env.AISPACE_GITHUB_MOCK_URL ? '../test-results/github' : '../test-results/app',
 })

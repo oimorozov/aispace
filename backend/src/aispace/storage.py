@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from .import_store import ImportStore
 from .models import Pipeline
 
 
@@ -36,6 +37,7 @@ class Store:
                 self.connection.execute(
                     "CREATE TABLE IF NOT EXISTS github_selections (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
                 )
+            self.imports = ImportStore(self)
             self.recover()
         except BaseException:
             self.connection.close()
@@ -262,7 +264,7 @@ class Store:
         data = self.workspace_info(workspace_id)
         if data is None:
             return None
-        return {**data, "tasklets": self.tasklets(workspace_id), "edges": self.edges(workspace_id)}
+        return {**data, "tasklets": self.tasklets(workspace_id), "edges": self.edges(workspace_id), "import_metadata": self.imports.metadata(workspace_id)}
 
     def create_workspace(self, data):
         stamp = now()
@@ -358,10 +360,10 @@ class Store:
             raise HTTPException(404, "Тасклет не найден")
         return tasklet
 
-    @staticmethod
-    def decode_tasklet(row):
+    def decode_tasklet(self, row):
         data = dict(row)
         data["position"] = json.loads(data["position"])
+        data["source"] = self.imports.tasklet_source(data["id"])
         return data
 
     def create_tasklet(self, data, workspace_id=None):
@@ -450,7 +452,7 @@ class Store:
     def edges(self, workspace_id=None):
         workspace_id = self._workspace_id(workspace_id)
         return [
-            {**dict(row), "pass_context": bool(row["pass_context"])}
+            {**dict(row), "pass_context": bool(row["pass_context"]), **self.imports.edge_source(row["id"])}
             for row in self.connection.execute(
                 "SELECT id,source,target,pass_context FROM edges WHERE workspace_id=? ORDER BY rowid",
                 (workspace_id,),

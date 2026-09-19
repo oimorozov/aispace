@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 events = []
 responses = {}
+planner_settings = {"mode": "valid"}
 events_lock = threading.Lock()
 
 
@@ -44,6 +45,10 @@ class Handler(BaseHTTPRequestHandler):
             with events_lock:
                 snapshot = list(events)
             self.send_json(200, {"events": snapshot})
+        elif path == "/planner":
+            with events_lock:
+                settings = dict(planner_settings)
+            self.send_json(200, settings)
         elif path == "/v1/models":
             authorization = self.headers.get("Authorization")
             if authorization and authorization != "Bearer local-test-key":
@@ -75,6 +80,14 @@ class Handler(BaseHTTPRequestHandler):
             with events_lock:
                 events.clear()
                 responses.clear()
+                planner_settings.clear()
+                planner_settings.update(mode="valid")
+            self.send_json(200, {"ok": True})
+            return
+        if path == "/planner":
+            with events_lock:
+                planner_settings.clear()
+                planner_settings.update(payload)
             self.send_json(200, {"ok": True})
             return
         if path == "/responses":
@@ -94,10 +107,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(401, {"error": {"message": "Invalid mock API key"}})
             return
         messages = payload.get("messages", [])
+        if (
+            payload.get("response_format", {}).get("json_schema", {}).get("name")
+            == "issue_graph"
+        ):
+            self.plan(payload)
+            return
         combined = "\n".join(str(message.get("content", "")) for message in messages)
         labels = re.findall(r"\[\[label:([^\]]+)\]\]", combined)
         delays = re.findall(r"\[\[delay:([\d.]+)\]\]", combined)
         label = labels[-1] if labels else "chat"
+        if not labels:
+            last = messages[-1].get("content", "") if messages else ""
+            for title, planned_label in (
+                ("Базовая схема", "plan-a"),
+                ("API", "plan-b"),
+                ("Интерфейс", "plan-c"),
+                ("Документация", "plan-d"),
+            ):
+                if last.startswith(f"# {title}\n") or last == title:
+                    label = planned_label
+                    break
         delay = min(float(delays[-1]), 30) if delays else 0.1
         request_id = f"chatcmpl-{uuid.uuid4().hex}"
         record(
@@ -106,7 +136,11 @@ class Handler(BaseHTTPRequestHandler):
         with events_lock:
             response = responses.get(label)
         chunks = response.get("chunks", []) if response else []
-        output = "".join(chunk["content"] for chunk in chunks) if response else f"Готово: {label}."
+        output = (
+            "".join(chunk["content"] for chunk in chunks)
+            if response
+            else f"Готово: {label}."
+        )
         try:
             if not payload.get("stream"):
                 time.sleep(delay)
@@ -146,7 +180,9 @@ class Handler(BaseHTTPRequestHandler):
                         self.send_chunk(request_id, {"content": chunk["content"]})
                         record("chunk", request_id, label, content=chunk["content"])
                     if response.get("error"):
-                        self.wfile.write(b'data: {"error":{"message":"Mock stream failure","type":"server_error","code":"mock_stream_error"}}\n\n')
+                        self.wfile.write(
+                            b'data: {"error":{"message":"Mock stream failure","type":"server_error","code":"mock_stream_error"}}\n\n'
+                        )
                         self.wfile.flush()
                         record("error", request_id, label)
                         return
@@ -159,6 +195,58 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             record("disconnect", request_id, label)
+
+    def plan(self, payload):
+        request_id = uuid.uuid4().hex
+        with events_lock:
+            settings = dict(planner_settings)
+        mode = settings.get("mode", "valid")
+        record(
+            "planning",
+            request_id,
+            "issue-graph",
+            transport="api",
+            payload=payload,
+            mode=mode,
+        )
+        data = json.loads(payload["messages"][-1]["content"])
+        ids = {issue["id"] for issue in data["issues"]}
+        edge = {
+            "source": 400002,
+            "target": 400003,
+            "origin": "ai",
+            "explanation": "Интерфейсу нужен подготовленный API.",
+        }
+        edges = [edge] if {400002, 400003}.issubset(ids) else []
+        if mode == "cycle":
+            edges = [edge, {**edge, "source": 400003, "target": 400001}]
+        elif mode == "self":
+            edges = [{**edge, "source": 400003, "target": 400003}]
+        elif mode == "foreign":
+            edges = [{**edge, "source": 999999999}]
+        elif mode == "reversed":
+            edges = [{**edge, "source": 400002, "target": 400001}]
+        elif mode == "unavailable":
+            self.send_json(503, {"error": {"message": "fixture unavailable"}})
+            return
+        content = "not JSON" if mode == "invalid" else json.dumps({"edges": edges})
+        message = {"role": "assistant", "content": content}
+        if mode == "tool":
+            message["tool_calls"] = [
+                {
+                    "id": "forbidden",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{}"},
+                }
+            ]
+        try:
+            time.sleep(settings.get("delay", 8 if mode == "slow" else 0.01))
+            self.send_json(
+                200, {"choices": [{"message": message, "finish_reason": "stop"}]}
+            )
+            record("planning_finish", request_id, "issue-graph", transport="api")
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            record("planning_disconnect", request_id, "issue-graph", transport="api")
 
     def wait_stream(self, delay):
         deadline = time.monotonic() + delay

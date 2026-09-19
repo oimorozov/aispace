@@ -7,6 +7,7 @@ test.skip(!github, 'Run with scripts/e2e_github.py and its isolated GitHub fixtu
 test.beforeEach(async ({ request }) => {
   await request.post(`${github}/fixture`, { data: {} })
   await request.patch(`${backend}/api/github/connection`, { data: { token: null } })
+  await request.patch(`${backend}/api/settings`, { data: { execution_mode: 'api', api_key: 'local-test-key', model: 'planner-fixture', base_url: `${process.env.AISPACE_E2E_PROVIDER_URL}/v1` } })
 })
 
 test('all GitHub pages, search, persistent selection and complete snapshot reach the planner', async ({ page, request }, testInfo) => {
@@ -34,7 +35,7 @@ test('all GitHub pages, search, persistent selection and complete snapshot reach
   const prepared = page.waitForResponse(response => response.url().endsWith('/api/github/selections') && response.request().method() === 'POST')
   await dialog.getByRole('button', { name: 'Построить граф', exact: true }).click()
   const snapshot = await (await prepared).json()
-  await expect(dialog.getByRole('heading', { name: 'Выбор готов к построению графа', exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Граф из GitHub Issues', exact: true })).toBeVisible()
   expect(snapshot.issues.map((item: { number: number }) => item.number)).toEqual([1, 22, 23])
   expect(snapshot.issues[1].body).toContain('## Полное описание #22')
   expect(snapshot.issues[1].dependencies.blocked_by).toHaveLength(2)
@@ -118,7 +119,7 @@ test('empty mobile app import handles rate limits and failed dependency reads ex
   await expect(dialog.getByRole('heading', { name: 'Выбрано issues: 1', exact: true })).toBeVisible()
   await request.post(`${github}/fixture`, { data: { dependencies_failure: true } })
   await dialog.getByRole('button', { name: 'Построить граф', exact: true }).click()
-  await expect(dialog.getByText('Зависимости прочитать не удалось', { exact: true })).toBeVisible()
-  await expect(dialog.getByRole('alert')).toContainText('Issues: read')
+  await expect(page.getByRole('heading', { name: 'Граф из GitHub Issues', exact: true })).toBeVisible()
+  await expect(page.getByRole('alert')).toContainText('Не прочитаны зависимости')
   expect(await (await request.get(`${backend}/api/workspaces`)).json()).toEqual([])
 })

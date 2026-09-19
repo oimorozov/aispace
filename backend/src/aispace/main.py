@@ -13,6 +13,7 @@ from .codex import CodexProvider
 from .directories import Directories
 from .github import GitHubClient
 from .github_api import github_router
+from .import_api import ImportService, import_router
 from .models import (
     DirectoryChoose,
     Edge,
@@ -45,6 +46,7 @@ def create_app(
     workspace_root=None,
     frontend_dir=None,
     github_client_factory=GitHubClient,
+    graph_planner=None,
 ):
     @asynccontextmanager
     async def lifespan(application):
@@ -59,9 +61,11 @@ def create_app(
         runtime = Runtime(store, provider or ChatProvider(), codex, directories)
         application.state.runtime = runtime
         application.state.github = github_client_factory(store)
+        application.state.imports = ImportService(runtime, application.state.github, graph_planner)
         try:
             yield
         finally:
+            await application.state.imports.close()
             await runtime.stop()
             await codex.close()
             await application.state.github.close()
@@ -86,6 +90,7 @@ def create_app(
         if origin.strip()
     )
     application.include_router(github_router(lambda: application.state.github))
+    application.include_router(import_router(lambda: application.state.imports))
 
     @application.exception_handler(RequestValidationError)
     async def validation_error(request, error):

@@ -1,18 +1,18 @@
 import { useEffect, useRef, useState } from 'react'
-import { ArrowRight, Check, ExternalLink, Github, LoaderCircle, X } from 'lucide-react'
+import { ArrowRight, ExternalLink, Github, LoaderCircle, X } from 'lucide-react'
 import { api } from '../lib/api'
 import type { GitHubIssue, GitHubRepository, GitHubSelection } from '../lib/types'
 
 const pageSize = 20
 const nameOf = (value: string) => value.trim().replace(/^https:\/\/github\.com\//i, '').replace(/\/$/, '').replace(/\.git$/, '').toLowerCase()
 
-export function GitHubImport({ onClose, onPlan, selection, onBack }: { onClose: () => void; onPlan: (selection: GitHubSelection) => void; selection?: GitHubSelection; onBack: () => void }) {
+export function GitHubImport({ onClose, onPlan, initialSelection }: { onClose: () => void; onPlan: (selection: GitHubSelection) => void; initialSelection?: GitHubSelection }) {
   const dialog = useRef<HTMLDialogElement>(null)
   const request = useRef(0)
-  const [input, setInput] = useState('')
-  const [repository, setRepository] = useState<GitHubRepository | null>(null)
-  const [issues, setIssues] = useState<GitHubIssue[]>([])
-  const [selected, setSelected] = useState<Record<number, GitHubIssue>>({})
+  const [input, setInput] = useState(initialSelection?.repository.full_name || '')
+  const [repository, setRepository] = useState<GitHubRepository | null>(initialSelection?.repository || null)
+  const [issues, setIssues] = useState<GitHubIssue[]>(initialSelection?.issues || [])
+  const [selected, setSelected] = useState<Record<number, GitHubIssue>>(Object.fromEntries((initialSelection?.issues || []).map(issue => [issue.id, issue])))
   const [state, setState] = useState('open')
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
@@ -29,6 +29,7 @@ export function GitHubImport({ onClose, onPlan, selection, onBack }: { onClose: 
   useEffect(() => {
     let active = true
     dialog.current?.showModal()
+    if (initialSelection) void api.githubRepository(initialSelection.repository.full_name).then(result => { if (active) setIssues(result.issues) }).catch(reason => { if (active) setError(reason.message) })
     void api.githubConnection().then(value => { if (active) setConfigured(value.token_configured) }).catch(reason => { if (active) setError(reason.message) })
     return () => { active = false; request.current++ }
   }, [])
@@ -73,13 +74,8 @@ export function GitHubImport({ onClose, onPlan, selection, onBack }: { onClose: 
   }
 
   return <dialog ref={dialog} className="modal github-import-modal" aria-labelledby="github-import-title" onCancel={onClose}>
-    <div className="modal-heading"><div><span className="eyebrow">GITHUB ISSUES</span><h2 id="github-import-title">Импортировать GitHub Issues</h2></div><button className="icon-button" aria-label="Закрыть импорт GitHub" onClick={onClose}><X size={18} /></button></div>
-    {selection ? <section className="github-selection-ready" aria-label="Выбор для планировщика">
-      <h3><Check size={18} />Выбор готов к построению графа</h3><p>{selection.repository.full_name} · {selection.issues.length} issues</p>
-      <p className="field-help">Полные описания и доступные зависимости загружены. Следующий шаг — построение графа и подтверждение нового пространства.</p>
-      {selection.issues.map(issue => <div className="github-selected-item" key={issue.id}><strong>#{issue.number} {issue.title}</strong><span>{issue.dependencies.status === 'complete' ? `Зависимостей: ${issue.dependencies.blocked_by.length}` : 'Зависимости прочитать не удалось'}</span>{issue.dependencies.error && <p className="notice error-notice" role="alert">#{issue.number}: {issue.dependencies.error}</p>}</div>)}
-      <button className="button button-secondary" onClick={onBack}>Вернуться к выбору</button>
-    </section> : <>
+    <div className="modal-heading"><div><h2 id="github-import-title">Импортировать GitHub Issues</h2></div><button className="icon-button" aria-label="Закрыть импорт GitHub" onClick={onClose}><X size={18} /></button></div>
+    <>
       <p className="field-help">Выберите issues для нового пространства. Текущий граф останется без изменений.</p>
       <p className="github-connection-status">{configured ? 'Токен GitHub настроен' : 'Без токена · публичные репозитории'}<span>Подключение GitHub настраивается отдельно в общих настройках.</span></p>
       <form className="github-repository-form" onSubmit={event => { event.preventDefault(); void load() }}><label className="field">Репозиторий GitHub<input value={input} onChange={event => setInput(event.target.value)} placeholder="owner/repo или https://github.com/owner/repo" disabled={Boolean(pending)} required /></label><button className="button button-secondary" disabled={Boolean(pending) || !input.trim()}>{pending === 'load' ? <LoaderCircle size={15} className="spin" /> : <Github size={15} />}Загрузить issues</button></form>
@@ -97,6 +93,6 @@ export function GitHubImport({ onClose, onPlan, selection, onBack }: { onClose: 
         <section className="github-selected" aria-label="Выбранные issues"><h3>Выбрано issues: {choices.length}</h3><p className="field-help">Включая задачи, скрытые фильтром или находящиеся на другой странице.</p>{choices.map(issue => <div className="github-selected-item" key={issue.id}><span>#{issue.number} {issue.title}</span><button className="icon-button" aria-label={`Убрать issue #${issue.number} из выбора`} disabled={Boolean(pending)} onClick={() => toggle(issue)}><X size={14} /></button></div>)}</section>
       </>}
       <div className="modal-actions"><button className="button button-secondary" onClick={onClose}>Закрыть</button><button className="button button-primary" disabled={!choices.length || Boolean(pending)} onClick={() => void prepare()}>{pending === 'selection' ? <LoaderCircle size={15} className="spin" /> : <ArrowRight size={15} />}Построить граф</button></div>
-    </>}
+    </>
   </dialog>
 }

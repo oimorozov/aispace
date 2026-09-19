@@ -24,8 +24,6 @@ class FakeCodex:
 
     def audit(self, kind, **values):
         destination = os.environ.get("AISPACE_FAKE_CODEX_AUDIT_URL")
-        if not destination:
-            return
         payload = {
             "transport": "codex",
             "kind": kind,
@@ -33,6 +31,12 @@ class FakeCodex:
             "time": time.monotonic(),
             **values,
         }
+        local = os.environ.get("AISPACE_FAKE_CODEX_AUDIT_FILE")
+        if local:
+            with self.audit_lock, Path(local).open("a") as output:
+                output.write(json.dumps(payload) + "\n")
+        if not destination:
+            return
         request = Request(
             destination,
             data=json.dumps(payload).encode(),
@@ -52,18 +56,121 @@ class FakeCodex:
         self.emit({"id": message["id"], "result": value})
 
     def thread(self, params):
+        ephemeral = params.get("ephemeral") is True
+        if ephemeral:
+            self.validate_planner(params)
         thread_id = params.get("threadId") or uuid.uuid4().hex
         path = self.state / f"{thread_id}.json"
-        previous = json.loads(path.read_text()) if path.exists() else {}
+        previous = (
+            json.loads(path.read_text()) if not ephemeral and path.exists() else {}
+        )
         current = {**previous, **params, "id": thread_id}
         current.pop("threadId", None)
         self.threads[thread_id] = current
         goal_path = self.state / f"{thread_id}.goal.json"
-        if goal_path.exists():
+        if not ephemeral and goal_path.exists():
             self.goals[thread_id] = json.loads(goal_path.read_text())
-        path.write_text(json.dumps(current))
-        self.audit("thread", thread_id=thread_id, parameters=current)
+        if not ephemeral:
+            path.write_text(json.dumps(current))
+        self.audit(
+            "planning_thread" if ephemeral else "thread",
+            thread_id=thread_id,
+            parameters=current,
+        )
         return {"thread": current}
+
+    def validate_planner(self, params):
+        required = {
+            "shell_tool",
+            "unified_exec",
+            "shell_snapshot",
+            "code_mode",
+            "code_mode_host",
+            "multi_agent",
+            "multi_agent_v2",
+            "goals",
+            "apps",
+            "plugins",
+            "remote_plugin",
+            "browser_use",
+            "browser_use_external",
+            "computer_use",
+            "image_generation",
+            "view_image",
+            "hooks",
+            "memories",
+            "skill_search",
+            "skill_mcp_dependency_install",
+            "workspace_dependencies",
+            "in_app_local_automation",
+            "request_permissions_tool",
+            "default_mode_request_user_input",
+        }
+        config = params.get("config", {})
+        features = config.get("features", {})
+        overrides = [
+            sys.argv[index + 1]
+            for index, item in enumerate(sys.argv[:-1])
+            if item == "-c"
+        ]
+        assert required <= features.keys()
+        assert all(value is False for value in features.values())
+        assert all(f"features.{feature}=false" in overrides for feature in required)
+        assert "notify=[]" in overrides and "project_doc_max_bytes=0" in overrides
+        assert params.get("sandbox") == "read-only"
+        assert params.get("approvalPolicy") == "never"
+        assert params.get("dynamicTools") == []
+        assert params.get("selectedCapabilityRoots") == []
+        assert params.get("modelProvider") == "openai"
+        assert params.get("baseInstructions") and params.get("developerInstructions")
+        assert config.get("web_search") == "disabled"
+        assert config.get("notify") == [] and config.get("project_doc_max_bytes") == 0
+        assert config.get("mcp_servers", {}).get("fixture_untrusted") == {
+            "enabled": False,
+            "required": False,
+        }
+
+    def planning_result(self, params, text):
+        assert isinstance(params.get("outputSchema"), dict)
+        assert params["outputSchema"]["properties"]["edges"]["type"] == "array"
+        data = json.loads(text)
+        ids = {issue["number"]: issue["id"] for issue in data["issues"]}
+        configuration = json.loads(
+            os.environ.get("AISPACE_FAKE_CODEX_PLANNER_JSON", "{}")
+        )
+        provider = os.environ.get("AISPACE_E2E_PROVIDER_URL")
+        if provider:
+            with urlopen(f"{provider}/planner", timeout=3) as response:
+                configuration = json.load(response)
+        mode = configuration.get("mode", "valid")
+        pairs = [(ids[2], ids[3])] if {2, 3} <= ids.keys() else []
+        if mode == "cycle":
+            pairs += [(ids[3], ids[1])]
+        elif mode == "self":
+            pairs = [(ids[1], ids[1])]
+        elif mode == "foreign":
+            pairs = [(ids[1], 999999999)]
+        elif mode == "reversed":
+            pairs = [(ids[2], ids[1])]
+        graph = {
+            "edges": [
+                {
+                    "source": source,
+                    "target": target,
+                    "origin": "ai",
+                    "explanation": "UI использует API",
+                }
+                for source, target in pairs
+            ]
+        }
+        return {
+            "planning": True,
+            "mode": mode,
+            "text": "not graph JSON" if mode == "invalid" else json.dumps(graph),
+            "delay": min(
+                float(configuration.get("delay", 30 if mode == "slow" else 0.05)), 30
+            ),
+        }
 
     def start_turn(self, message, params):
         thread_id = params["threadId"]
@@ -80,14 +187,19 @@ class FakeCodex:
             "label": label,
             "stop": stop,
         }
+        if self.threads[thread_id].get("ephemeral"):
+            record.update(self.planning_result(params, text))
+            record["label"] = label = "github-planner"
+            delay = record["delay"]
         self.turns[turn_id] = record
         self.audit(
-            "start",
+            "planning_start" if record.get("planning") else "start",
             thread_id=thread_id,
             turn_id=turn_id,
             label=label,
             input=text,
             parameters=self.threads[thread_id],
+            turn_parameters=params,
         )
         turn = {"id": turn_id, "status": "inProgress", "items": []}
         self.result(message, {"turn": turn})
@@ -107,11 +219,27 @@ class FakeCodex:
         try:
             if interrupted:
                 self.audit(
-                    "cancelled", thread_id=thread_id, turn_id=turn_id, label=label
+                    "planning_cancelled" if record.get("planning") else "cancelled",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    label=label,
                 )
             else:
-                text = f"Готово: {label}."
+                text = record.get("text", f"Готово: {label}.")
                 item_id = uuid.uuid4().hex
+                if record.get("mode") == "tool":
+                    self.notify(
+                        "item/completed",
+                        {
+                            "threadId": thread_id,
+                            "turnId": turn_id,
+                            "item": {
+                                "id": item_id,
+                                "type": "mcpToolCall",
+                                "status": "failed",
+                            },
+                        },
+                    )
                 self.notify(
                     "item/agentMessage/delta",
                     {
@@ -136,7 +264,12 @@ class FakeCodex:
                     self.notify(
                         "thread/goal/updated", {"threadId": thread_id, "goal": goal}
                     )
-                self.audit("finish", thread_id=thread_id, turn_id=turn_id, label=label)
+                self.audit(
+                    "planning_finish" if record.get("planning") else "finish",
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    label=label,
+                )
             self.turns.pop(turn_id, None)
             self.notify(
                 "turn/completed",
@@ -159,6 +292,18 @@ class FakeCodex:
             return
         if method == "initialize":
             result = {"userAgent": "aispace-e2e-codex"}
+        elif method == "config/read":
+            self.audit("planning_config_read")
+            result = {
+                "config": {
+                    "mcp_servers": {
+                        "fixture_untrusted": {
+                            "command": "must-never-run",
+                            "enabled": True,
+                        },
+                    }
+                }
+            }
         elif method == "account/read":
             result = {
                 "account": {
@@ -233,6 +378,13 @@ class FakeCodex:
             turn["stop"].set()
         for worker in self.workers:
             worker.join(timeout=4)
+        ephemeral = [
+            thread_id
+            for thread_id, params in self.threads.items()
+            if params.get("ephemeral")
+        ]
+        if ephemeral:
+            self.audit("planning_cleanup", thread_ids=ephemeral)
         self.audit("process_exit", active_turns=len(self.turns))
 
 

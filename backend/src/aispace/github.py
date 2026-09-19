@@ -233,7 +233,7 @@ class GitHubClient:
             }
         return {"status": "complete", "blocked_by": list(dependencies.values()), "error": None}
 
-    async def selection(self, value, repository_id, selected):
+    async def selection(self, value, repository_id, selected, *, persist=True):
         repository = await self.repository(value)
         if repository["id"] != repository_id:
             raise GitHubError(409, "Репозиторий изменился. Загрузите его issues заново.")
@@ -259,7 +259,8 @@ class GitHubClient:
             issues.append(issue)
             seen.add(item.id)
         snapshot = {"id": new_id(), "repository": repository, "issues": issues, "created_at": now()}
-        self.store.save_github_selection(snapshot)
+        if persist:
+            self.store.save_github_selection(snapshot)
         return snapshot
 
     async def bounded(self, operation):
